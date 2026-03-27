@@ -1,275 +1,362 @@
-#!/usr/bin/env python3
-import os
-import sys
-import subprocess
-import argparse
-import time
-from datetime import datetime
+#include <iostream>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <chrono>
+#include <thread>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <unordered_set>
+#include <cstdlib>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
-SNAPSHOT_BASE = "/nf-tree/snapshots"
-AUTO_DIR = os.path.join(SNAPSHOT_BASE, "auto")
-MANUAL_DIR = os.path.join(SNAPSHOT_BASE, "manual")
-ROOT_SOURCE = "/"
-HOME_SOURCE = "/home"
-SERVICE_PATH = "/etc/systemd/system/nf-tree.service"
+const std::string SNAPSHOT_BASE = "/nf-tree/snapshots";
+const std::string AUTO_DIR = SNAPSHOT_BASE + "/auto";
+const std::string MANUAL_DIR = SNAPSHOT_BASE + "/manual";
+const std::string ROOT_SOURCE = "/";
+const std::string HOME_SOURCE = "/home";
+const std::string SERVICE_PATH = "/etc/systemd/system/nf-tree.service";
 
-def setup_dirs():
-    if not os.path.exists(AUTO_DIR):
-        os.makedirs(AUTO_DIR)
-    if not os.path.exists(MANUAL_DIR):
-        os.makedirs(MANUAL_DIR)
+struct CmdResult {
+    int returncode;
+    std::string stdout_str;
+};
 
-def run_cmd(command):
-    try:
-        result = subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if result.returncode == 0:
-            return True
-        else:
-            print(f"Error executing {' '.join(command)}:")
-            print(result.stderr.decode('utf-8'))
-            return False
-    except Exception as e:
-        print(f"Execution failed: {e}")
-        return False
-
-def update_grub():
-    print(">> Updating GRUB config (this may take a few seconds)...", flush=True)
-    subprocess.run(["update-grub"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    print(">> GRUB updated.", flush=True)
-
-def check_changes(path, last_snapshot_time, is_root_path=False):
-    root_exclude = {'proc', 'sys', 'dev', 'run', 'tmp', 'var', 'mnt', 'media', 'boot'}
-    general_exclude = {'nf-tree', '.snapshots', 'swapfile', '.cache', 'Downloads', 'node_modules', '.local'}
+CmdResult run_cmd(const std::string& cmd) {
+    CmdResult res = {-1, ""};
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return res;
     
-    dirs_to_scan = [path]
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        res.stdout_str += buffer;
+    }
     
-    while dirs_to_scan:
-        current_dir = dirs_to_scan.pop()
-        try:
-            with os.scandir(current_dir) as it:
-                for entry in it:
-                    if entry.is_symlink():
-                        continue
-                        
-                    if entry.name in general_exclude:
-                        continue
-                        
-                    if is_root_path and current_dir == path and entry.name in root_exclude:
-                        continue
-                        
-                    if entry.is_dir(follow_symlinks=False):
-                        dirs_to_scan.append(entry.path)
-                    elif entry.is_file(follow_symlinks=False):
-                        if entry.stat(follow_symlinks=False).st_mtime > last_snapshot_time:
-                            return True
-        except OSError:
-            continue
-    return False
+    int pclose_res = pclose(pipe);
+    res.returncode = (pclose_res == -1) ? -1 : WEXITSTATUS(pclose_res);
+    return res;
+}
 
-def toggle_swap(active):
-    if not active:
-        subprocess.run(["swapoff", "-a"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    else:
-        if os.path.exists("/dev/zram0"):
-            subprocess.run(["mkswap", "/dev/zram0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            subprocess.run(["swapon", "/dev/zram0", "-p", "100"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        else:
-            subprocess.run(["swapon", "-a"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+void run_cmd_silent(const std::string& cmd) {
+    std::system((cmd + " >/dev/null 2>&1").c_str());
+}
 
-def cleanup_retention(base_name):
-    try:
-        snapshots = [s for s in os.listdir(AUTO_DIR) if s.startswith(base_name)]
-        snapshots.sort()
-        
-        if len(snapshots) > 6:
-            to_remove = snapshots[:-6]
-            for snap in to_remove:
-                full_path = os.path.join(AUTO_DIR, snap)
-                subprocess.run(["btrfs", "subvolume", "delete", full_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print(f"Auto-removed old snapshot: {snap}")
-    except OSError:
-        pass
+void setup_dirs() {
+    std::filesystem::create_directories(AUTO_DIR);
+    std::filesystem::create_directories(MANUAL_DIR);
+}
 
-def create_snapshot(source, name, is_auto=False):
-    setup_dirs()
-    
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    target_name = f"{name}-{timestamp}"
-    
-    target_dir = AUTO_DIR if is_auto else MANUAL_DIR
-    target_path = os.path.join(target_dir, target_name)
+void update_grub() {
+    run_cmd_silent("update-grub");
+}
 
-    if os.path.exists(target_path):
-        if not is_auto:
-            print(f"Error: Snapshot {target_name} already exists.")
-        return False
+std::string get_subvol_id(const std::string& path) {
+    CmdResult res = run_cmd("btrfs subvolume show " + path);
+    if (res.returncode == 0) {
+        std::istringstream iss(res.stdout_str);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.find("Subvolume ID:") != std::string::npos) {
+                size_t pos = line.find_last_of(" \t");
+                if (pos != std::string::npos) {
+                    return line.substr(pos + 1);
+                }
+            }
+        }
+    }
+    return "";
+}
 
-    is_root = (source == ROOT_SOURCE)
-    
-    if is_root:
-        toggle_swap(False)
+bool check_changes(const std::string& path, std::time_t last_snapshot_time, bool is_root_path = false) {
+    std::unordered_set<std::string> root_exclude = {"proc", "sys", "dev", "run", "tmp", "var", "mnt", "media", "boot"};
+    std::unordered_set<std::string> general_exclude = {"nf-tree", ".snapshots", "swapfile", ".cache", "Downloads", "node_modules", ".local"};
 
-    try:
-        cmd = ["btrfs", "subvolume", "snapshot", source, target_path]
-        if run_cmd(cmd):
-            print(f"Created: {target_path}", flush=True)
-            if is_auto:
-                cleanup_retention(name)
-            return True
-        else:
-            print(f"Failed: {target_name}", flush=True)
-            return False
-    finally:
-        if is_root:
-            toggle_swap(True)
+    std::vector<std::string> dirs_to_scan = {path};
 
-def remove_snapshot(name):
-    path_auto = os.path.join(AUTO_DIR, name)
-    path_manual = os.path.join(MANUAL_DIR, name)
-    
-    target_path = None
-    if os.path.exists(path_manual):
-        target_path = path_manual
-    elif os.path.exists(path_auto):
-        target_path = path_auto
-    
-    if target_path:
-        cmd = ["btrfs", "subvolume", "delete", target_path]
-        if run_cmd(cmd):
-            print(f"Removed: {target_path}", flush=True)
-            return True
-        else:
-            print(f"Error removing: {target_path}", flush=True)
-            return False
-    else:
-        print(f"Error: Snapshot {name} not found in auto or manual directories.")
-        return False
+    while (!dirs_to_scan.empty()) {
+        std::string current_dir = dirs_to_scan.back();
+        dirs_to_scan.pop_back();
 
-def list_snapshots():
-    setup_dirs()
-    print(f"\n--- Manual Snapshots ({MANUAL_DIR}) ---")
-    if os.path.exists(MANUAL_DIR):
-        items = sorted(os.listdir(MANUAL_DIR))
-        if items:
-            for snap in items:
-                print(f"  {snap}")
-        else:
-            print("  (None)")
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(current_dir, ec)) {
+            if (ec) continue; 
             
-    print(f"\n--- Auto Snapshots ({AUTO_DIR}) ---")
-    if os.path.exists(AUTO_DIR):
-        items = sorted(os.listdir(AUTO_DIR))
-        if items:
-            for snap in items:
-                print(f"  {snap}")
-        else:
-            print("  (None)")
-    print("")
+            if (entry.is_symlink(ec)) continue;
 
-def ensure_systemd_service():
-    if os.path.exists(SERVICE_PATH):
-        return False
+            std::string name = entry.path().filename().string();
+            if (general_exclude.count(name)) continue;
+            if (is_root_path && current_dir == path && root_exclude.count(name)) continue;
+
+            if (entry.is_directory(ec)) {
+                dirs_to_scan.push_back(entry.path().string());
+            } else if (entry.is_regular_file(ec)) {
+                struct stat st;
+                if (lstat(entry.path().string().c_str(), &st) == 0) {
+                    if (st.st_mtime > last_snapshot_time) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void toggle_swap(bool active) {
+    if (!active) {
+        run_cmd_silent("swapoff -a");
+    } else {
+        if (std::filesystem::exists("/dev/zram0")) {
+            run_cmd_silent("mkswap /dev/zram0");
+            run_cmd_silent("swapon /dev/zram0 -p 100");
+        } else {
+            run_cmd_silent("swapon -a");
+        }
+    }
+}
+
+void cleanup_retention(const std::string& base_name) {
+    std::vector<std::string> snapshots;
+    std::error_code ec;
     
-    print("Systemd service not found. Creating...")
-    script_path = os.path.abspath(sys.argv[0])
+    for (const auto& entry : std::filesystem::directory_iterator(AUTO_DIR, ec)) {
+        if (ec) continue;
+        std::string name = entry.path().filename().string();
+        if (name.rfind(base_name, 0) == 0) {
+            snapshots.push_back(name);
+        }
+    }
     
-    content = f"""[Unit]
-Description=NF-Tree Snapshot Daemon
-After=local-fs.target time-sync.target
-
-[Service]
-Type=simple
-ExecStart={sys.executable} {script_path} start-daemon
-Restart=always
-RestartSec=60
-User=root
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-"""
-    try:
-        with open(SERVICE_PATH, "w") as f:
-            f.write(content)
-        
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
-        subprocess.run(["systemctl", "enable", "--now", "nf-tree.service"], check=False)
-        print(f"Service created and started at {SERVICE_PATH}")
-        return True
-    except Exception as e:
-        print(f"Failed to create systemd service: {e}")
-        return False
-
-def daemon_loop():
-    print("NF-Tree Daemon started...")
-    last_run = time.time()
+    std::sort(snapshots.begin(), snapshots.end());
     
-    while True:
-        current_time = time.time()
-        
-        home_changed = check_changes(HOME_SOURCE, last_run, is_root_path=False)
-        root_changed = check_changes(ROOT_SOURCE, last_run, is_root_path=True)
-        
-        if home_changed or root_changed:
-            subprocess.run(["sync"], check=False)
-            grub_needs_update = False
+    if (snapshots.size() > 6) {
+        for (size_t i = 0; i < snapshots.size() - 6; ++i) {
+            std::string target = AUTO_DIR + "/" + snapshots[i];
+            CmdResult res = run_cmd("btrfs subvolume delete " + target);
+            if (res.returncode == 0) {
+                std::cout << "Auto-removed: " << snapshots[i] << "\n";
+            }
+        }
+    }
+}
+
+bool create_snapshot(const std::string& source, const std::string& name, bool is_auto = false) {
+    setup_dirs();
+    
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    char buf[100];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+    
+    std::string target_name = name + "-" + buf;
+    std::string target_path = (is_auto ? AUTO_DIR : MANUAL_DIR) + "/" + target_name;
+
+    if (std::filesystem::exists(target_path)) {
+        return false;
+    }
+
+    bool is_root = (source == ROOT_SOURCE);
+    if (is_root) {
+        toggle_swap(false);
+    }
+
+    CmdResult res = run_cmd("btrfs subvolume snapshot " + source + " " + target_path);
+    bool success = false;
+    
+    if (res.returncode == 0) {
+        std::cout << "Created: " << target_name << "\n";
+        if (is_auto) {
+            cleanup_retention(name);
+        }
+        success = true;
+    }
+    
+    if (is_root) {
+        toggle_swap(true);
+    }
+    
+    return success;
+}
+
+bool remove_snapshot(const std::string& name) {
+    std::string p_auto = AUTO_DIR + "/" + name;
+    std::string p_man = MANUAL_DIR + "/" + name;
+    
+    std::string target = std::filesystem::exists(p_man) ? p_man : (std::filesystem::exists(p_auto) ? p_auto : "");
+
+    if (!target.empty()) {
+        CmdResult res = run_cmd("btrfs subvolume delete " + target);
+        if (res.returncode == 0) {
+            std::cout << "Removed: " << name << "\n";
+            return true;
+        }
+    }
+    return false;
+}
+
+void list_snapshots() {
+    setup_dirs();
+    std::vector<std::pair<std::string, std::string>> dirs = {{"Manual", MANUAL_DIR}, {"Auto", AUTO_DIR}};
+    
+    for (const auto& dir : dirs) {
+        std::cout << "\n--- " << dir.first << " Snapshots ---\n";
+        if (std::filesystem::exists(dir.second)) {
+            std::vector<std::string> root_snaps, home_snaps;
+            std::error_code ec;
             
-            if home_changed:
-                if create_snapshot(HOME_SOURCE, "home-auto", is_auto=True):
-                    grub_needs_update = True
+            for (const auto& entry : std::filesystem::directory_iterator(dir.second, ec)) {
+                if (ec) continue;
+                std::string name = entry.path().filename().string();
+                if (name.rfind("root-", 0) == 0) root_snaps.push_back(name);
+                else if (name.rfind("home-", 0) == 0) home_snaps.push_back(name);
+            }
             
-            if root_changed:
-                if create_snapshot(ROOT_SOURCE, "root-auto", is_auto=True):
-                    grub_needs_update = True
-            
-            if grub_needs_update:
-                update_grub()
+            std::sort(root_snaps.begin(), root_snaps.end());
+            std::sort(home_snaps.begin(), home_snaps.end());
 
-        last_run = current_time
-        time.sleep(10800) 
+            std::cout << "  [Root]\n";
+            if (root_snaps.empty()) std::cout << "    (None)\n";
+            else for (const auto& s : root_snaps) std::cout << "    " << s << "\n";
 
-def main():
-    parser = argparse.ArgumentParser(description="NF-Tree Snapshot Manager")
-    subparsers = parser.add_subparsers(dest="command")
+            std::cout << "  [Home]\n";
+            if (home_snaps.empty()) std::cout << "    (None)\n";
+            else for (const auto& s : home_snaps) std::cout << "    " << s << "\n";
+        }
+    }
+    std::cout << "\n";
+}
 
-    create_parser = subparsers.add_parser("create")
-    create_parser.add_argument("name", help="Snapshot name prefix")
+bool rollback_snapshot(const std::string& name) {
+    std::string p_auto = AUTO_DIR + "/" + name;
+    std::string p_man = MANUAL_DIR + "/" + name;
+    std::string snap_path = std::filesystem::exists(p_man) ? p_man : (std::filesystem::exists(p_auto) ? p_auto : "");
 
-    remove_parser = subparsers.add_parser("remove")
-    remove_parser.add_argument("name", help="Full snapshot folder name to remove")
+    if (snap_path.empty()) {
+        std::cout << "Error: Snapshot " << name << " not found.\n";
+        return false;
+    }
+
+    std::string target;
+    if (name.rfind("root-", 0) == 0) target = ROOT_SOURCE;
+    else if (name.rfind("home-", 0) == 0) target = HOME_SOURCE;
+    else {
+        std::cout << "Error: Invalid target for rollback.\n";
+        return false;
+    }
+
+    std::string subid = get_subvol_id(snap_path);
+    if (subid.empty()) {
+        std::cout << "Error: Could not retrieve subvolume ID.\n";
+        return false;
+    }
+
+    std::cout << ">> Setting " << name << " (ID: " << subid << ") as default for " << target << "...\n";
+    CmdResult res = run_cmd("btrfs subvolume set-default " + subid + " " + target);
+
+    if (res.returncode == 0) {
+        std::cout << "Success: " << name << " is now the default subvolume.\n";
+        std::cout << "!! A REBOOT is required to apply the rollback !!\n";
+        return true;
+    }
+
+    std::cout << "Rollback failed\n";
+    return false;
+}
+
+bool ensure_systemd_service() {
+    if (std::filesystem::exists(SERVICE_PATH)) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::string exe_path = std::filesystem::canonical("/proc/self/exe", ec).string();
+    if (ec) return false;
+
+std::string content = "[Unit]\n"
+                          "Description=NF-Tree Snapshot Daemon\n"
+                          "After=local-fs.target time-sync.target\n\n"
+                          "[Service]\n"
+                          "Type=simple\n"
+                          "ExecStart=" + exe_path + " start-daemon\n"
+                          "Restart=always\n"
+                          "RestartSec=60\n"
+                          "User=root\n\n"
+                          "[Install]\n"
+                          "WantedBy=multi-user.target\n";
+
+    std::ofstream out(SERVICE_PATH);
+    if (out) {
+        out << content;
+        out.close();
+        run_cmd_silent("systemctl daemon-reload");
+        run_cmd_silent("systemctl enable --now nf-tree.service");
+        return true;
+    }
+    return false;
+}
+
+void daemon_loop() {
+    std::time_t last_run = std::time(nullptr);
     
-    subparsers.add_parser("list")
-    subparsers.add_parser("start-daemon")
-    
-    args = parser.parse_args()
+    while (true) {
+        std::time_t current_time = std::time(nullptr);
+        bool h_ch = check_changes(HOME_SOURCE, last_run);
+        bool r_ch = check_changes(ROOT_SOURCE, last_run, true);
 
-    if args.command == "create":
-        is_auto_snapshot = args.name.startswith("apt") or args.name == "auto"
-        
-        res1 = create_snapshot(ROOT_SOURCE, f"root-{args.name}", is_auto=is_auto_snapshot)
-        res2 = create_snapshot(HOME_SOURCE, f"home-{args.name}", is_auto=is_auto_snapshot)
-        
-        if res1 or res2:
-            update_grub()
-    
-    elif args.command == "remove":
-        if remove_snapshot(args.name):
-            update_grub()
-        
-    elif args.command == "list":
-        list_snapshots()
+        if (h_ch || r_ch) {
+            run_cmd_silent("sync");
+            bool upd = false;
 
-    elif args.command == "start-daemon":
-        if ensure_systemd_service():
-            sys.exit(0)
-        
-        try:
-            daemon_loop()
-        except KeyboardInterrupt:
-            print("Daemon stopped.")
+            if (r_ch && create_snapshot(ROOT_SOURCE, "root-auto", true)) upd = true;
+            if (h_ch && create_snapshot(HOME_SOURCE, "home-auto", true)) upd = true;
 
-if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print("Error: Must run as root")
-        sys.exit(1)
-    main()
+            if (upd) {
+                update_grub();
+            }
+        }
+
+        last_run = current_time;
+        std::this_thread::sleep_for(std::chrono::seconds(10800));
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (getuid() != 0) {
+        return 1;
+    }
+
+    if (argc < 2) {
+        return 0;
+    }
+
+    std::string cmd = argv[1];
+
+    if (cmd == "create" && argc == 3) {
+        std::string name = argv[2];
+        bool is_auto = (name.rfind("apt", 0) == 0 || name == "auto");
+        bool res_root = create_snapshot(ROOT_SOURCE, "root-" + name, is_auto);
+        bool res_home = create_snapshot(HOME_SOURCE, "home-" + name, is_auto);
+        
+        if (res_root || res_home) {
+            update_grub();
+        }
+    } else if (cmd == "remove" && argc == 3) {
+        if (remove_snapshot(argv[2])) {
+            update_grub();
+        }
+    } else if (cmd == "rollback" && argc == 3) {
+        if (rollback_snapshot(argv[2])) {
+            update_grub();
+        }
+    } else if (cmd == "list") {
+        list_snapshots();
+    } else if (cmd == "start-daemon") {
+        if (!ensure_systemd_service()) {
+            daemon_loop();
+        }
+    }
+
+    return 0;
+}
