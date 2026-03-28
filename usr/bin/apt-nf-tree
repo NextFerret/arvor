@@ -1,384 +1,486 @@
-#!/usr/bin/env python3
-import os
-import sys
-import subprocess
-import urllib.request
-import re
-import shutil
-import time
-from datetime import datetime
+#include <iostream>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <cstdlib>
+#include <fstream>
+#include <regex>
+#include <sstream>
+#include <curl/curl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <chrono>
+#include <iomanip>
+#include <map>
+#include <algorithm>
+#include <set>
 
-APT_NF_PATH = "/usr/share/apt-nf-tree/apt"
-TREE_ROOT = "/nf-tree/apt-nf-tree/root"
-BASE_URL = "https://nextferret.github.io"
-VERSION = "1.3r2"
+namespace fs = std::filesystem;
 
-apt_bin = APT_NF_PATH if os.path.exists(APT_NF_PATH) and os.access(APT_NF_PATH, os.X_OK) else "apt"
+const std::string APT_NF_PATH = "/usr/share/apt-nf-tree/apt";
+const std::string TREE_ROOT = "/nf-tree/apt-nf-tree/root";
+const std::string BASE_URL = "https://nextferret.github.io";
+const std::string DUR_BASE = "https://nextferretdur.github.io";
+const std::string VERSION = "1.3r2";
 
-def mount_pseudo_fs():
-    subprocess.run(["mount", "--bind", "/dev",       f"{TREE_ROOT}/dev"],     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["mount", "--bind", "/dev/pts",   f"{TREE_ROOT}/dev/pts"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["mount", "--bind", "/proc",      f"{TREE_ROOT}/proc"],    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["mount", "--bind", "/sys",       f"{TREE_ROOT}/sys"],     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+std::string apt_bin;
 
-def umount_pseudo_fs():
-    for p in ["/dev/pts", "/dev", "/proc", "/sys"]:
-        subprocess.run(["umount", "-l", f"{TREE_ROOT}{p}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
+struct DurInfo {
+    std::string repo;
+    std::string file;
+    std::string version;
+};
 
-def manage_sandbox(action):
-    if action == "create":
-        if os.path.exists(TREE_ROOT):
-            umount_pseudo_fs()
-            subprocess.run(["btrfs", "subvolume", "delete", "-c", TREE_ROOT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.makedirs(os.path.dirname(TREE_ROOT), exist_ok=True)
-        subprocess.run(["btrfs", "subvolume", "snapshot", "/", TREE_ROOT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    elif action == "delete":
-        if os.path.exists(TREE_ROOT):
-            umount_pseudo_fs()
-            subprocess.run(["btrfs", "subvolume", "delete", "-c", TREE_ROOT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
 
-def show_rain_warning():
-    print("\n" + "="*70)
-    print("  ALERT: if it is raining: SHUT DOWN YOUR COMPUTER NOW")
-    print("  IF IT'S A LAPTOP → UNPLUG IT IMMEDIATELY!")
-    print("  ! Otherwise your hardware can be affected by rain !")
-    print("="*70 + "\n")
+std::string fetch_url(const std::string& url) {
+    CURL* curl;
+    CURLcode res;
+    std::string readBuffer;
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        if (res == CURLE_OK) return readBuffer;
+    }
+    return "";
+}
 
-def ask_confirm(prompt="Apply this transaction to the REAL system? [y/N]: "):
-    sys.stdout.flush()
-    while True:
-        ans = input(prompt).strip().lower()
-        if ans in ("y", "yes"):
-            return True
-        if ans in ("n", "no", ""):
-            return False
-        print("Please answer y or n.")
+bool download_file(const std::string& url, const std::string& path) {
+    CURL* curl;
+    FILE* fp;
+    CURLcode res;
+    curl = curl_easy_init();
+    if (curl) {
+        fp = fopen(path.c_str(), "wb");
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        fclose(fp);
+        return res == CURLE_OK;
+    }
+    return false;
+}
 
-def is_package_already_installed(pkg_name):
-    try:
-        result = subprocess.run(["dpkg-query", "--show", "--showformat=${Status}", pkg_name],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-        return "install ok installed" in result.stdout.strip()
-    except:
-        return False
+int exec(const std::string& cmd, bool quiet = true) {
+    std::string command = cmd;
+    if (quiet) command += " > /dev/null 2>&1";
+    return std::system(command.c_str());
+}
 
-def cleanup_old_snapshots():
-    try:
-        out = subprocess.run(["nf-tree", "list"], capture_output=True, text=True).stdout
-        snapshots = [line.strip() for line in out.splitlines() if line.strip() and not line.startswith("-")]
-        date_map = {}
-        for snap in snapshots:
-            match = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', snap)
-            if match:
-                try:
-                    dt = datetime.strptime(match.group(1), "%Y-%m-%d_%H-%M-%S")
-                    date_map[snap] = dt
-                except:
-                    date_map[snap] = datetime.min
-            else:
-                date_map[snap] = datetime.min
-        sorted_snaps = sorted(date_map.items(), key=lambda x: x[1], reverse=True)
-        to_keep = []
-        to_delete = []
-        keep_count = 0
-        pre_count = 0
-        post_count = 0
-        for snap, _ in sorted_snaps:
-            if keep_count < 12:
-                to_keep.append(snap)
-                keep_count += 1
-                if "host-pre" in snap:
-                    pre_count += 1
-                if "host-post" in snap:
-                    post_count += 1
-            else:
-                if "host-pre" in snap and pre_count < 3:
-                    to_keep.append(snap)
-                    pre_count += 1
-                elif "host-post" in snap and post_count < 3:
-                    to_keep.append(snap)
-                    post_count += 1
-                else:
-                    to_delete.append(snap)
-        for snap in set(to_delete):
-            subprocess.run(["nf-tree", "remove", snap], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if len(to_delete) > 0:
-            print(f"→ Cleaned {len(to_delete)} old snapshots")
-    except:
-        pass
+std::string exec_out(const std::string& cmd) {
+    std::string data;
+    FILE* stream = popen(cmd.c_str(), "r");
+    if (stream) {
+        char buffer[256];
+        while (!feof(stream)) {
+            if (fgets(buffer, 256, stream) != NULL) data.append(buffer);
+        }
+        pclose(stream);
+    }
+    return data;
+}
 
-def run_direct(args):
-    show_rain_warning()
-    print("\n" + "="*80)
-    print("  !!! --FORCE MODE ACTIVATED !!!")
-    print("  Running DIRECTLY on host WITHOUT sandbox test.")
-    print("  This may result in an unstable or broken system!")
-    print("  Use at your own risk!")
-    print("="*80 + "\n")
+void mount_pseudo_fs() {
+    exec("mount --bind /dev " + TREE_ROOT + "/dev");
+    exec("mount --bind /dev/pts " + TREE_ROOT + "/dev/pts");
+    exec("mount --bind /proc " + TREE_ROOT + "/proc");
+    exec("mount --bind /sys " + TREE_ROOT + "/sys");
+}
 
-    if not ask_confirm("Continue with --force? [y/N]: "):
-        print("Cancelled by user.")
-        sys.exit(0)
+void umount_pseudo_fs() {
+    std::vector<std::string> pts = {"/dev/pts", "/dev", "/proc", "/sys"};
+    for (const auto& p : pts) {
+        exec("umount -l " + TREE_ROOT + p);
+    }
+    usleep(500000);
+}
 
-    print(">> Host: creating pre-installation snapshot ...")
-    subprocess.run(["nf-tree", "create", "apt-host-pre"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(">> Pre-snapshot created")
+void manage_sandbox(const std::string& action) {
+    if (action == "create") {
+        if (fs::exists(TREE_ROOT)) {
+            umount_pseudo_fs();
+            exec("btrfs subvolume delete -c " + TREE_ROOT);
+        }
+        fs::create_directories(fs::path(TREE_ROOT).parent_path());
+        exec("btrfs subvolume snapshot / " + TREE_ROOT);
+    } else if (action == "delete") {
+        if (fs::exists(TREE_ROOT)) {
+            umount_pseudo_fs();
+            exec("btrfs subvolume delete -c " + TREE_ROOT);
+        }
+    }
+}
 
-    print(">> Applying to real system ...")
-    real_args = list(args)
-    if "-y" not in real_args and "--yes" not in real_args:
-        real_args.append("-y")
-    real = subprocess.run([apt_bin] + real_args)
-    if real.returncode != 0:
-        print(">> Real apt FAILED!")
-        sys.exit(1)
+void show_warning() {
+    std::cout << "\n======================================================================" << std::endl;
+    std::cout << "  ALERT: nf-tree disables swap during operation" << std::endl;
+    std::cout << "  This can trigger OOM (Out Of Memory) killer!" << std::endl;
+    std::cout << "  Close heavy applications if you have low RAM!" << std::endl;
+    std::cout << "======================================================================\n" << std::endl;
+}
 
-    print(">> Host: creating post-installation snapshot ...")
-    subprocess.run(["nf-tree", "create", "apt-host-post"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(">> Post-snapshot created")
+bool ask_confirm(const std::string& prompt = "Apply this transaction to the REAL system? [y/N]: ") {
+    std::cout << prompt;
+    std::string ans;
+    std::getline(std::cin, ans);
+    std::transform(ans.begin(), ans.end(), ans.begin(), ::tolower);
+    return (ans == "y" || ans == "yes");
+}
 
-    print(">> Done. Cleaning old snapshots...")
-    cleanup_old_snapshots()
+bool is_package_already_installed(const std::string& pkg_name) {
+    std::string out = exec_out("dpkg-query --show --showformat='${Status}' " + pkg_name + " 2>/dev/null");
+    return out.find("install ok installed") != std::string::npos;
+}
 
-def run_sandboxed(args):
-    show_rain_warning()
+void cleanup_old_snapshots() {
+    try {
+        std::string out = exec_out("nf-tree list");
+        std::vector<std::string> snapshots;
+        std::stringstream ss(out);
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (!line.empty() && line[0] != '-') snapshots.push_back(line);
+        }
 
-    if args and args[0] == "install" and len(args) > 1:
-        packages = [a for a in args[1:] if not a.startswith("-") and not a.startswith("/") and not a.endswith(".deb")]
-        if packages:
-            already = [p for p in packages if is_package_already_installed(p)]
-            if already and len(already) == len(packages):
-                print(f"Package(s) {' '.join(already)} already installed → skipping")
-                return
-            if already:
-                print(f"Note: {' '.join(already)} already installed (apt will skip)")
-        deb_list = []
-        for arg in args[1:]:
-            if arg.endswith(".deb") and os.path.isfile(arg):
-                try:
-                    pkg = subprocess.run(["dpkg-deb", "--show", "--showformat=${Package}", arg],
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
-                    if pkg:
-                        deb_list.append((arg, pkg))
-                except:
-                    pass
-        if deb_list:
-            already_deb = [pkg for _, pkg in deb_list if is_package_already_installed(pkg)]
-            if already_deb and len(already_deb) == len(deb_list):
-                print(f"Package(s) {' '.join(already_deb)} already installed → skipping")
-                return
-            if already_deb:
-                print(f"Note: {' '.join(already_deb)} already installed (apt will skip)")
+        std::vector<std::pair<std::string, std::time_t>> date_map;
+        std::regex date_regex("(\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2})");
+        
+        for (const auto& snap : snapshots) {
+            std::smatch match;
+            if (std::regex_search(snap, match, date_regex)) {
+                std::tm tm = {};
+                std::istringstream iss(match[1]);
+                iss >> std::get_time(&tm, "%Y-%m-%d_%H-%M-%S");
+                date_map.push_back({snap, std::mktime(&tm)});
+            } else {
+                date_map.push_back({snap, 0});
+            }
+        }
 
-    deb_map = {}
-    for arg in args:
-        if arg.endswith(".deb") and os.path.isfile(arg):
-            deb_map[arg] = os.path.basename(arg)
+        std::sort(date_map.begin(), date_map.end(), [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
 
-    manage_sandbox("create")
-    mount_pseudo_fs()
+        int keep_count = 0, pre_count = 0, post_count = 0;
+        std::set<std::string> to_delete;
 
-    for host_path, base in deb_map.items():
-        sandbox_path = os.path.join(TREE_ROOT, "tmp", base)
-        shutil.copy2(host_path, sandbox_path)
+        for (const auto& item : date_map) {
+            const std::string& snap = item.first;
+            bool is_pre = snap.find("host-pre") != std::string::npos;
+            bool is_post = snap.find("host-post") != std::string::npos;
 
-    sandbox_args = list(args)
-    for host_path, base in deb_map.items():
-        sandbox_args = [f"/tmp/{base}" if a == host_path else a for a in sandbox_args]
+            if (keep_count < 12) {
+                keep_count++;
+                if (is_pre) pre_count++;
+                if (is_post) post_count++;
+            } else {
+                if (is_pre && pre_count < 3) {
+                    pre_count++;
+                } else if (is_post && post_count < 3) {
+                    post_count++;
+                } else {
+                    to_delete.insert(snap);
+                }
+            }
+        }
 
-    if "-y" not in sandbox_args and "--yes" not in sandbox_args:
-        sandbox_args.append("-y")
+        for (const auto& snap : to_delete) {
+            exec("nf-tree remove " + snap);
+        }
+        if (!to_delete.empty()) {
+            std::cout << "→ Cleaned " << to_delete.size() << " old snapshots" << std::endl;
+        }
+    } catch (...) {}
+}
 
-    chroot_cmd = ["chroot", TREE_ROOT, apt_bin] + sandbox_args
+std::vector<std::string> create_host_snapshot(const std::string& base_name) {
+    std::string out = exec_out("nf-tree create " + base_name);
+    std::vector<std::string> snapshots;
+    std::stringstream ss(out);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("Created: ") == 0) {
+            snapshots.push_back(line.substr(9));
+        }
+    }
+    return snapshots;
+}
 
-    res = subprocess.run(chroot_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    umount_pseudo_fs()
+void rollback_snapshots(const std::vector<std::string>& snapshot_list) {
+    for (const auto& snap : snapshot_list) {
+        exec("nf-tree rollback " + snap, false);
+    }
+}
 
-    if res.returncode != 0:
-        print(">> Sandbox test: FAILED → no changes applied")
-        if res.stderr:
-            print(res.stderr.decode(errors="replace").strip())
-        manage_sandbox("delete")
-        return
+std::string get_debian_version(const std::string& pkg) {
+    std::string out = exec_out("apt-cache policy " + pkg);
+    std::stringstream ss(out);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("Candidate:") != std::string::npos) {
+            size_t pos = line.find(':');
+            std::string ver = line.substr(pos + 1);
+            ver.erase(0, ver.find_first_not_of(" \t"));
+            return ver.substr(0, ver.find_first_of(" \t\n"));
+        }
+    }
+    return "";
+}
 
-    print(">> Sandbox test: SUCCESS")
-    print(">> Transaction appears safe.")
+std::map<std::string, DurInfo> get_dur_info() {
+    std::string content = fetch_url(DUR_BASE + "/METADATA");
+    std::map<std::string, DurInfo> dur_pkgs;
+    if (content.empty()) return dur_pkgs;
 
-    if not ask_confirm():
-        print(">> Cancelled by user → no changes applied")
-        manage_sandbox("delete")
-        return
+    std::regex dur_regex("\"([^\"]+)\"\\s+Repo=(\\d+)\\s+.*File=([^ ]+\\.deb)\\s+Version=([0-9.]+)");
+    std::stringstream ss(content);
+    std::string line;
+    while (std::getline(ss, line)) {
+        std::smatch match;
+        if (std::regex_search(line, match, dur_regex)) {
+            dur_pkgs[match[1]] = {match[2], match[3], match[4]};
+        }
+    }
+    return dur_pkgs;
+}
 
-    print(">> Host: creating pre-installation snapshot ...")
-    subprocess.run(["nf-tree", "create", "apt-host-pre"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(">> Pre-snapshot created")
+void run_sandboxed(std::vector<std::string> args);
 
-    print(">> Applying to real system ...")
-    real_args = list(args)
-    if "-y" not in real_args and "--yes" not in real_args:
-        real_args.append("-y")
-    real = subprocess.run([apt_bin] + real_args)
-    if real.returncode != 0:
-        print(">> Real apt FAILED!")
-        manage_sandbox("delete")
-        return
+void install_from_dur_or_debian(const std::string& pkg_name) {
+    if (is_package_already_installed(pkg_name)) {
+        std::cout << pkg_name << " already installed → skipping" << std::endl;
+        return;
+    }
+    auto dur_pkgs = get_dur_info();
+    if (dur_pkgs.count(pkg_name)) {
+        std::string debian_ver = get_debian_version(pkg_name);
+        std::string dur_ver = dur_pkgs[pkg_name].version;
+        if (debian_ver.empty() || dur_ver > debian_ver) {
+            std::string url = DUR_BASE + "/repo" + dur_pkgs[pkg_name].repo + "/" + dur_pkgs[pkg_name].file;
+            fs::create_directories("/tmp/nf-tree-debs");
+            std::string path = "/tmp/nf-tree-debs/" + dur_pkgs[pkg_name].file;
+            std::cout << "Fetching " << pkg_name << " from DUR (newer version)..." << std::endl;
+            if (download_file(url, path)) {
+                run_sandboxed({"install", path});
+                return;
+            }
+        } else {
+            std::cout << pkg_name << " using Debian repo (newer or equal)" << std::endl;
+        }
+    } else {
+        std::cout << pkg_name << " not found in DUR → using Debian repo" << std::endl;
+    }
+    run_sandboxed({"install", pkg_name});
+}
 
-    print(">> Host: creating post-installation snapshot ...")
-    subprocess.run(["nf-tree", "create", "apt-host-post"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(">> Post-snapshot created")
+void run_direct(std::vector<std::string> args) {
+    show_warning();
+    std::cout << "\n================================================================================" << std::endl;
+    std::cout << "  !!! --FORCE MODE ACTIVATED !!!" << std::endl;
+    std::cout << "  Running DIRECTLY on host WITHOUT sandbox test." << std::endl;
+    std::cout << "  This may result in an unstable or broken system!" << std::endl;
+    std::cout << "  Use at your own risk!" << std::endl;
+    std::cout << "================================================================================\n" << std::endl;
 
-    manage_sandbox("delete")
-    print(">> Done. Cleaning old snapshots...")
-    cleanup_old_snapshots()
+    if (!ask_confirm("Continue with --force? [y/N]: ")) {
+        std::cout << "Cancelled by user." << std::endl;
+        exit(0);
+    }
 
-def run_update():
-    subprocess.run([apt_bin, "update"])
+    std::cout << ">> Host: creating pre-installation snapshot ..." << std::endl;
+    auto pre_snaps = create_host_snapshot("apt-host-pre");
+    
+    std::string cmd = apt_bin;
+    bool has_yes = false;
+    for (const auto& a : args) {
+        cmd += " " + a;
+        if (a == "-y" || a == "--yes") has_yes = true;
+    }
+    if (!has_yes) cmd += " -y";
 
-def fetch(path):
-    try:
-        req = urllib.request.Request(f"{BASE_URL}/{path}", headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            content = r.read().decode('utf-8').strip()
-            if len(content) < 20:
-                return ""
-            return content
-    except:
-        return ""
+    if (exec(cmd, false) != 0) {
+        std::cout << ">> Real apt FAILED! Rolling back..." << std::endl;
+        rollback_snapshots(pre_snaps);
+        std::cout << "Rollback initiated. REBOOT REQUIRED!" << std::endl;
+        exit(1);
+    }
 
-def get_version(content):
-    m = re.search(r'^VERSION_ID="?([^"\n]+)"?', content, re.MULTILINE)
-    try: return float(m.group(1)) if m else 0.0
-    except: return 0.0
+    create_host_snapshot("apt-host-post");
+    cleanup_old_snapshots();
+}
 
-def process_packages_to_install():
-    content = fetch("packages-to-install")
-    if not content: return
-    tmp = "/tmp/nf-tree-debs"
-    os.makedirs(tmp, exist_ok=True)
-    for line in content.splitlines():
-        if "→" not in line: continue
-        pkg, url = [x.strip() for x in line.split("→", 1)]
-        if url.startswith("nextferret.github.io"): url = "https://" + url
-        if not url.endswith(".deb"): continue
-        if is_package_already_installed(pkg):
-            print(f"Package '{pkg}' already installed → skipping")
-            continue
-        print(f"Fetching {pkg} …")
-        path = os.path.join(tmp, f"{pkg}.deb")
-        try:
-            urllib.request.urlretrieve(url, path)
-            run_sandboxed(["install", path])
-        except Exception as e:
-            print(f"→ failed {pkg}: {e}")
+void run_sandboxed(std::vector<std::string> args) {
+    show_warning();
+    if (!args.empty() && args[0] == "install" && args.size() > 1) {
+        bool only_pkgs = true;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i][0] == '-' || args[i][0] == '/' || args[i].find(".deb") != std::string::npos) {
+                only_pkgs = false; break;
+            }
+        }
+        if (only_pkgs) {
+            for (size_t i = 1; i < args.size(); ++i) install_from_dur_or_debian(args[i]);
+            return;
+        }
+    }
 
-def system_upgrade():
-    show_rain_warning()
+    std::map<std::string, std::string> deb_map;
+    for (const auto& arg : args) {
+        if (arg.find(".deb") != std::string::npos && fs::exists(arg)) {
+            deb_map[arg] = fs::path(arg).filename().string();
+        }
+    }
 
-    if os.path.exists("/etc/apt/sources.list"):
-        shutil.copy2("/etc/apt/sources.list", "/etc/apt/sources.list.nf-backup")
-    if os.path.exists("/etc/os-release"):
-        shutil.copy2("/etc/os-release", "/etc/os-release.nf-backup")
+    manage_sandbox("create");
+    mount_pseudo_fs();
 
-    local_os = open("/etc/os-release").read() if os.path.exists("/etc/os-release") else ""
+    for (auto const& [host_path, base] : deb_map) {
+        fs::copy_file(host_path, TREE_ROOT + "/tmp/" + base, fs::copy_options::overwrite_existing);
+    }
 
-    remote_os = fetch("etc/os-release")
-    remote_codename = fetch("debian_codename").strip()
+    std::string chroot_cmd = "chroot " + TREE_ROOT + " " + apt_bin;
+    bool has_yes = false;
+    for (const auto& a : args) {
+        if (deb_map.count(a)) chroot_cmd += " /tmp/" + deb_map[a];
+        else chroot_cmd += " " + a;
+        if (a == "-y" || a == "--yes") has_yes = true;
+    }
+    if (!has_yes) chroot_cmd += " -y";
 
-    if remote_codename and len(remote_codename) > 2:
-        m = re.search(r'^VERSION_CODENAME="?([^"\n]+)"?', local_os, re.M)
-        local_codename = m.group(1) if m else ""
-        if remote_codename != local_codename or not local_codename:
-            sources = f"""deb http://deb.debian.org/debian {remote_codename} main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian {remote_codename}-updates main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security {remote_codename}-security main contrib non-free non-free-firmware
-"""
-            open("/etc/apt/sources.list", "w").write(sources)
-            print(f"→ sources.list updated to {remote_codename}")
+    int res = exec(chroot_cmd);
+    umount_pseudo_fs();
 
-    if remote_os and "VERSION_ID" in remote_os:
-        open("/etc/os-release", "w").write(remote_os)
+    if (res != 0) {
+        std::cout << ">> Sandbox test: FAILED → no changes applied" << std::endl;
+        manage_sandbox("delete");
+        return;
+    }
 
-    process_packages_to_install()
+    std::cout << ">> Sandbox test: SUCCESS\n>> Transaction appears safe." << std::endl;
+    if (!ask_confirm()) {
+        manage_sandbox("delete");
+        return;
+    }
 
-    pkgs_remove = [p for p in fetch("packages-to-remove").split() if p]
-    if pkgs_remove:
-        print(f"Packages to remove: {' '.join(pkgs_remove)}")
-        if ask_confirm("Remove recommended packages? [y/N]: "):
-            run_sandboxed(["remove"] + pkgs_remove)
-        else:
-            print("→ Removal skipped")
+    std::cout << ">> Host: creating pre-installation snapshot ..." << std::endl;
+    auto pre_snaps = create_host_snapshot("apt-host-pre");
 
-    print("Running full system upgrade …")
-    run_sandboxed(["full-upgrade"])
+    std::string real_cmd = apt_bin;
+    for (const auto& a : args) real_cmd += " " + a;
+    if (!has_yes) real_cmd += " -y";
 
-def print_help():
-    print("Usage: apt-nf-tree <command> [options] [packages...] [--force]")
-    print("")
-    print("Allowed commands:")
-    print("  install      [packages]")
-    print("  remove       [packages]")
-    print("  autoremove")
-    print("  update")
-    print("  upgrade")
-    print("  upgrade --system")
-    print("  --system     (shortcut for upgrade --system)")
-    print("  -v")
-    print("")
-    print("--force : run directly on host without sandbox (may break system)")
+    if (exec(real_cmd, false) != 0) {
+        rollback_snapshots(pre_snaps);
+        manage_sandbox("delete");
+        exit(1);
+    }
 
-def main():
-    if len(sys.argv) < 2:
-        print_help()
-        sys.exit(0)
+    create_host_snapshot("apt-host-post");
+    manage_sandbox("delete");
+    cleanup_old_snapshots();
+}
 
-    args = sys.argv[1:]
-    force_mode = "--force" in args
-    if force_mode:
-        args = [a for a in args if a != "--force"]
+void process_dur_packages() {
+    auto dur_pkgs = get_dur_info();
+    for (auto const& [pkg_name, info] : dur_pkgs) {
+        std::string debian_ver = get_debian_version(pkg_name);
+        if (debian_ver.empty() || info.version > debian_ver) {
+            std::string url = DUR_BASE + "/repo" + info.repo + "/" + info.file;
+            std::string path = "/tmp/nf-tree-debs/" + info.file;
+            fs::create_directories("/tmp/nf-tree-debs");
+            if (download_file(url, path)) run_sandboxed({"install", path});
+        }
+    }
+}
 
-    if not args:
-        print_help()
-        sys.exit(0)
+void system_upgrade() {
+    show_warning();
+    if (fs::exists("/etc/apt/sources.list")) fs::copy_file("/etc/apt/sources.list", "/etc/apt/sources.list.nf-backup", fs::copy_options::overwrite_existing);
+    
+    std::string remote_codename = fetch_url(BASE_URL + "/debian_codename");
+    remote_codename.erase(std::remove(remote_codename.begin(), remote_codename.end(), '\n'), remote_codename.end());
 
-    first_arg = args[0]
+    if (remote_codename.length() > 2) {
+        std::ofstream ofs("/etc/apt/sources.list");
+        ofs << "deb http://deb.debian.org/debian " << remote_codename << " main contrib non-free non-free-firmware\n";
+        ofs << "deb http://deb.debian.org/debian " << remote_codename << "-updates main contrib non-free non-free-firmware\n";
+        ofs << "deb http://security.debian.org/debian-security " << remote_codename << "-security main contrib non-free non-free-firmware\n";
+        ofs.close();
+    }
 
-    if first_arg in ("-v", "--v"):
-        print(VERSION)
-        sys.exit(0)
+    process_dur_packages();
+    std::string to_remove = fetch_url(BASE_URL + "/packages-to-remove");
+    if (!to_remove.empty()) {
+        std::vector<std::string> rem_args = {"remove"};
+        std::stringstream ss(to_remove);
+        std::string p;
+        while(ss >> p) rem_args.push_back(p);
+        if (ask_confirm("Remove recommended packages? [y/N]: ")) run_sandboxed(rem_args);
+    }
+    run_sandboxed({"full-upgrade"});
+}
 
-    if first_arg == "--system":
-        if os.geteuid() != 0:
-            print("Need root.")
-            sys.exit(1)
-        system_upgrade()
-        sys.exit(0)
+void print_help() {
+    std::cout << "Usage: apt-nf-tree <command> [options] [packages...] [--force]\n\n"
+              << "Allowed commands:\n"
+              << "  install      [packages]\n"
+              << "  remove       [packages]\n"
+              << "  autoremove\n"
+              << "  update\n"
+              << "  upgrade\n"
+              << "  upgrade --system\n"
+              << "  --system     (shortcut for upgrade --system)\n"
+              << "  -v\n\n"
+              << "--force : run directly on host without sandbox\n";
+}
 
-    cmd = first_arg
-    cmd_args = args[1:] if len(args) > 1 else []
+int main(int argc, char* argv[]) {
+    curl_global_init(CURL_GLOBAL_ALL);
+    if (argc < 2) { print_help(); return 0; }
 
-    if cmd not in ("install", "remove", "autoremove", "update", "upgrade"):
-        print_help()
-        sys.exit(1)
+    apt_bin = (fs::exists(APT_NF_PATH) && (fs::status(APT_NF_PATH).permissions() & fs::perms::others_exec) != fs::perms::none) ? APT_NF_PATH : "apt";
 
-    if os.geteuid() != 0:
-        print("Need root.")
-        sys.exit(1)
+    std::vector<std::string> raw_args;
+    bool force_mode = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--force") force_mode = true;
+        else raw_args.push_back(a);
+    }
 
-    if cmd == "upgrade" and "--system" in args:
-        system_upgrade()
-    elif force_mode:
-        if cmd == "autoremove":
-            run_direct(["autoremove"])
-        else:
-            run_direct([cmd] + cmd_args)
-    elif cmd == "update":
-        run_update()
-    else:
-        if cmd == "autoremove":
-            run_sandboxed(["autoremove"])
-        else:
-            run_sandboxed([cmd] + cmd_args)
+    if (raw_args.empty()) { print_help(); return 0; }
+    if (raw_args[0] == "-v") { std::cout << VERSION << std::endl; return 0; }
+    
+    if (getuid() != 0) { std::cout << "Need root." << std::endl; return 1; }
 
-if __name__ == "__main__":
-    main()
+    if (raw_args[0] == "--system") { system_upgrade(); return 0; }
+
+    std::string cmd = raw_args[0];
+    std::vector<std::string> cmd_args(raw_args.begin() + 1, raw_args.end());
+
+    if (cmd == "upgrade" && std::find(raw_args.begin(), raw_args.end(), "--system") != raw_args.end()) {
+        system_upgrade();
+    } else if (force_mode) {
+        run_direct(raw_args);
+    } else if (cmd == "update") {
+        exec(apt_bin + " update", false);
+    } else if (cmd == "install") {
+        for (const auto& p : cmd_args) install_from_dur_or_debian(p);
+    } else {
+        run_sandboxed(raw_args);
+    }
+
+    curl_global_cleanup();
+    return 0;
+}
