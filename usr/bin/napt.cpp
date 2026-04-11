@@ -1,0 +1,1142 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
+#include <cerrno>
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <map>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <apt-pkg/init.h>
+#include <apt-pkg/configuration.h>
+#include <apt-pkg/pkgsystem.h>
+#include <apt-pkg/cachefile.h>
+#include <apt-pkg/depcache.h>
+#include <apt-pkg/acquire.h>
+#include <apt-pkg/acquire-item.h>
+#include <apt-pkg/algorithms.h>
+#include <apt-pkg/packagemanager.h>
+#include <apt-pkg/pkgrecords.h>
+#include <apt-pkg/sourcelist.h>
+#include <apt-pkg/policy.h>
+#include <apt-pkg/upgrade.h>
+#include <apt-pkg/error.h>
+#include <apt-pkg/version.h>
+
+using namespace std;
+namespace fs = std::filesystem;
+
+const string TREE_ROOT = "/nf-tree/napt/root";
+const string NF_TREE_BIN = "/usr/bin/nf-tree";
+const string AUTO_SNAP_DIR = "/nf-tree/snapshots/auto";
+const string NAPT_ETC_DIR = "/etc/napt";
+const string NAPT_SOURCES_PATH = "/etc/napt/sources.list";
+const string NAPT_CACHE_DIR = "/etc/napt/cache";
+
+struct NaptSource {
+    string base_url;
+    string release;
+};
+
+struct NaptRepoMetadata {
+    string base_url;
+    string release;
+    map<string, string> packages;
+};
+
+struct NaptPackageCandidate {
+    bool found = false;
+    string base_url;
+    string release;
+    string file_name;
+    string version;
+};
+
+struct AptPackageState {
+    bool found = false;
+    bool installed = false;
+    string installed_version;
+    string candidate_version;
+};
+
+struct InstallDecision {
+    string package_name;
+    string apt_argument;
+    string selected_version;
+    bool from_napt = false;
+};
+
+bool nf_tree_available() {
+    return access(NF_TREE_BIN.c_str(), X_OK) == 0;
+}
+
+void show_help() {
+    cout << "New Advanced Packaging Tool - napt 1.0\n\n"
+         << "Usage: napt [command] [options]\n\n"
+         << "Commands:\n"
+         << "  install          Installs packages in a sandbox; applies to host only if successful.\n"
+         << "  remove           Removes packages in a sandbox; applies to host only if successful.\n"
+         << "  sync             Updates repository metadata.\n"
+         << "  upgrade          Upgrades all packages, or selected packages, using the sandbox-first method.\n"
+         << "  dist-upgrade     Full release upgrade\n"
+         << "  purge            Removes packages and their configuration files.\n"
+         << "  clean            Cleans the Napt download cache.\n\n"
+         << "Options:\n"
+         << "  --apply-host     Skip the sandbox and apply changes directly to the host.\n"
+         << "  --v              Show version information.\n"
+         << "  --vb             Enable verbose logging for debugging libapt transactions.\n"
+         << "  -h               Show this help message.\n\n"
+         << "                 This napt Has Super Cow Powers.\n";
+}
+
+int run_cmd(const string& cmd) {
+    int rc = system(cmd.c_str());
+    if (rc == -1) return 1;
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    return 1;
+}
+
+bool create_snapshot(const string& name) {
+    if (!nf_tree_available()) {
+        return false;
+    }
+    return run_cmd(NF_TREE_BIN + " create " + name) == 0;
+}
+
+bool wait_for_child(pid_t pid, int& status) {
+    status = 0;
+    while (true) {
+        pid_t ret = waitpid(pid, &status, 0);
+        if (ret == pid) {
+            return true;
+        }
+        if (ret == -1 && errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+}
+
+enum class PrecheckResult {
+    Proceed,
+    NoChanges,
+    Failed
+};
+
+PrecheckResult precheck_transaction(const string& action, const vector<string>& pkgs, bool quiet) {
+    if (action != "install" && action != "remove" && action != "purge") {
+        return PrecheckResult::Proceed;
+    }
+
+    if (pkgs.empty()) {
+        if (!quiet) {
+            cout << "No packages were specified.\n";
+        }
+        return PrecheckResult::Failed;
+    }
+
+    pkgCacheFile cache_file;
+    pkgCache* cache = cache_file.GetPkgCache();
+    pkgDepCache* dep_cache = cache_file.GetDepCache();
+
+    if (cache == nullptr || dep_cache == nullptr) {
+        return PrecheckResult::Proceed;
+    }
+
+    bool has_changes = false;
+
+    for (const auto& pkg_name : pkgs) {
+        pkgCache::PkgIterator pkg = cache->FindPkg(pkg_name);
+        if (pkg.end()) {
+            if (!quiet) {
+                cout << "Package " << pkg_name << " not found.\n";
+            }
+            return PrecheckResult::Failed;
+        }
+
+        if (action == "install") {
+            pkgCache::VerIterator cand = dep_cache->GetCandidateVersion(pkg);
+            if (pkg->CurrentVer != 0 && (cand.end() || cand == pkg.CurrentVer())) {
+                if (!quiet) {
+                    cout << pkg_name << " is already the newest version.\n";
+                }
+                continue;
+            }
+            has_changes = true;
+            continue;
+        }
+
+        if (pkg->CurrentVer == 0) {
+            if (!quiet) {
+                cout << "Package " << pkg_name << " is not installed.\n";
+            }
+            continue;
+        }
+
+        has_changes = true;
+    }
+
+    if (!has_changes) {
+        return PrecheckResult::NoChanges;
+    }
+
+    return PrecheckResult::Proceed;
+}
+
+string shell_quote(const string& s) {
+    string out = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+string build_apt_cmd(const string& action, const vector<string>& pkgs, bool quiet) {
+    string cmd = "DEBIAN_FRONTEND=noninteractive apt-get ";
+    if (quiet) {
+        cmd += "-qq ";
+    }
+    cmd += "-y ";
+
+    if (action == "install" || action == "remove" || action == "purge") {
+        if (pkgs.empty()) {
+            return "";
+        }
+        cmd += action;
+        for (const auto& p : pkgs) {
+            cmd += " ";
+            cmd += shell_quote(p);
+        }
+        return cmd;
+    }
+
+    if (action == "upgrade" || action == "dist-upgrade") {
+        cmd += action;
+        return cmd;
+    }
+
+    return "";
+}
+
+void mount_fs() {
+    run_cmd("mount --bind /dev " + TREE_ROOT + "/dev >/dev/null 2>&1");
+    run_cmd("mount --bind /dev/pts " + TREE_ROOT + "/dev/pts >/dev/null 2>&1");
+    run_cmd("mount --bind /proc " + TREE_ROOT + "/proc >/dev/null 2>&1");
+    run_cmd("mount --bind /sys " + TREE_ROOT + "/sys >/dev/null 2>&1");
+}
+
+void umount_fs() {
+    run_cmd("umount -l " + TREE_ROOT + "/dev/pts >/dev/null 2>&1");
+    run_cmd("umount -l " + TREE_ROOT + "/dev >/dev/null 2>&1");
+    run_cmd("umount -l " + TREE_ROOT + "/proc >/dev/null 2>&1");
+    run_cmd("umount -l " + TREE_ROOT + "/sys >/dev/null 2>&1");
+}
+
+void manage_sandbox(const string& action) {
+    if (action == "create") {
+        umount_fs();
+        run_cmd("btrfs subvolume delete -c " + TREE_ROOT + " >/dev/null 2>&1");
+        run_cmd("mkdir -p /nf-tree/napt");
+        run_cmd("btrfs subvolume snapshot / " + TREE_ROOT + " >/dev/null 2>&1");
+    } else if (action == "delete") {
+        umount_fs();
+        run_cmd("btrfs subvolume delete -c " + TREE_ROOT + " >/dev/null 2>&1");
+    }
+}
+
+string get_latest_snapshot(const string& prefix) {
+    DIR* dir = opendir(AUTO_SNAP_DIR.c_str());
+    if (!dir) return "";
+    struct dirent* entry;
+    vector<string> matches;
+    while ((entry = readdir(dir)) != NULL) {
+        string name = entry->d_name;
+        if (name.find(prefix) == 0) {
+            matches.push_back(name);
+        }
+    }
+    closedir(dir);
+    if (matches.empty()) return "";
+    sort(matches.begin(), matches.end());
+    return matches.back();
+}
+
+void do_rollback(const string& prefix) {
+    if (!nf_tree_available()) {
+        return;
+    }
+
+    string root_snap = get_latest_snapshot("root-auto-" + prefix);
+    if (!root_snap.empty()) {
+        cout << "Rolling back root: " << root_snap << "\n";
+        run_cmd(NF_TREE_BIN + " rollback " + root_snap);
+    }
+}
+
+string fetch_url(const string& url) {
+    string cmd = "curl -fsSL " + shell_quote(url);
+    char buffer[512];
+    string result;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+        result += buffer;
+    }
+    int rc = pclose(pipe);
+    if (rc == -1) return "";
+    if (WIFEXITED(rc) && WEXITSTATUS(rc) == 0) return result;
+    return "";
+}
+
+string trim_copy(const string& s) {
+    size_t start = s.find_first_not_of(" \n\r\t");
+    if (start == string::npos) {
+        return "";
+    }
+    size_t end = s.find_last_not_of(" \n\r\t");
+    return s.substr(start, end - start + 1);
+}
+
+bool starts_with(const string& value, const string& prefix) {
+    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool ends_with(const string& value, const string& suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool path_is_directory(const string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool path_is_regular_file(const string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+string path_basename(const string& path) {
+    size_t pos = path.find_last_of('/');
+    if (pos == string::npos) {
+        return path;
+    }
+    return path.substr(pos + 1);
+}
+
+string normalize_napt_base_url(const string& raw_url) {
+    string url = trim_copy(raw_url);
+    if (url.find("http://") != 0 && url.find("https://") != 0) {
+        url = "https://" + url;
+    }
+    while (!url.empty() && url.back() == '/') {
+        url.pop_back();
+    }
+
+    const string prefix = "https://nextferretdur.github.io/repo-nflinux-";
+    if (!starts_with(url, prefix)) {
+        return "";
+    }
+
+    string suffix = url.substr(prefix.size());
+    if (suffix.empty()) {
+        return "";
+    }
+
+    for (char c : suffix) {
+        if (!isdigit(static_cast<unsigned char>(c))) {
+            return "";
+        }
+    }
+
+    return url;
+}
+
+bool parse_napt_source_line(const string& raw_line, NaptSource& source) {
+    string line = trim_copy(raw_line);
+    if (line.empty() || line[0] == '#') {
+        return false;
+    }
+
+    istringstream iss(line);
+    string type;
+    string base_url;
+    string release;
+    if (!(iss >> type >> base_url >> release)) {
+        return false;
+    }
+
+    if (type != "deb") {
+        return false;
+    }
+
+    base_url = normalize_napt_base_url(base_url);
+    release = trim_copy(release);
+    if (base_url.empty() || release.empty()) {
+        return false;
+    }
+
+    source.base_url = base_url;
+    source.release = release;
+    return true;
+}
+
+void print_napt_repo_warning() {
+    static bool shown = false;
+    if (shown) {
+        return;
+    }
+
+    cout << "Warning: packages from Napt repositories that are not provided by your distributor may contain malware.\n";
+    shown = true;
+}
+
+void load_napt_sources_from_file(const string& path, vector<NaptSource>& sources) {
+    ifstream in(path);
+    if (!in) {
+        return;
+    }
+
+    string line;
+    while (getline(in, line)) {
+        NaptSource source;
+        if (parse_napt_source_line(line, source)) {
+            sources.push_back(source);
+        }
+    }
+}
+
+vector<NaptSource> load_napt_sources() {
+    vector<NaptSource> sources;
+
+    if (path_is_regular_file(NAPT_SOURCES_PATH)) {
+        load_napt_sources_from_file(NAPT_SOURCES_PATH, sources);
+        return sources;
+    }
+
+    if (path_is_directory(NAPT_SOURCES_PATH)) {
+        DIR* dir = opendir(NAPT_SOURCES_PATH.c_str());
+        if (!dir) {
+            return sources;
+        }
+
+        vector<string> files;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+            string path = NAPT_SOURCES_PATH + "/" + name;
+            if (path_is_regular_file(path)) {
+                files.push_back(path);
+            }
+        }
+        closedir(dir);
+
+        sort(files.begin(), files.end());
+        for (const auto& path : files) {
+            load_napt_sources_from_file(path, sources);
+        }
+    }
+
+    return sources;
+}
+
+bool write_text_file(const string& path, const string& content) {
+    ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << content;
+    return out.good();
+}
+
+bool read_text_file(const string& path, string& content) {
+    ifstream in(path);
+    if (!in) {
+        return false;
+    }
+    stringstream buffer;
+    buffer << in.rdbuf();
+    content = buffer.str();
+    return true;
+}
+
+bool parse_napt_repo_metadata(const string& text, NaptRepoMetadata& metadata) {
+    metadata.packages.clear();
+
+    string line;
+    bool in_packages = false;
+    stringstream ss(text);
+
+    while (getline(ss, line)) {
+        string trimmed = trim_copy(line);
+        if (trimmed.empty()) {
+            continue;
+        }
+
+        if (trimmed == "[napt repository]") {
+            continue;
+        }
+
+        if (starts_with(trimmed, "release=")) {
+            metadata.release = trim_copy(trimmed.substr(8));
+            continue;
+        }
+
+        if (trimmed == "packages:") {
+            in_packages = true;
+            continue;
+        }
+
+        if (!in_packages) {
+            continue;
+        }
+
+        size_t pos = trimmed.find('=');
+        if (pos == string::npos) {
+            continue;
+        }
+
+        string pkg = trim_copy(trimmed.substr(0, pos));
+        string file_name = trim_copy(trimmed.substr(pos + 1));
+        if (!pkg.empty() && !file_name.empty()) {
+            metadata.packages[pkg] = file_name;
+        }
+    }
+
+    return !metadata.release.empty();
+}
+
+bool sync_napt_metadata() {
+    vector<NaptSource> sources = load_napt_sources();
+    if (sources.empty()) {
+        return true;
+    }
+
+    print_napt_repo_warning();
+    run_cmd("mkdir -p " + shell_quote(NAPT_ETC_DIR));
+
+    bool ok = true;
+    for (const auto& source : sources) {
+        string url = source.base_url + "/releases/" + source.release + "/repo-metadata";
+        string metadata = fetch_url(url);
+        if (metadata.empty()) {
+            cout << "Failed to fetch metadata: " << url << "\n";
+            ok = false;
+            continue;
+        }
+
+        string release_dir = NAPT_ETC_DIR + "/" + source.release;
+        if (run_cmd("mkdir -p " + shell_quote(release_dir)) != 0) {
+            cout << "Failed to create metadata directory: " << release_dir << "\n";
+            ok = false;
+            continue;
+        }
+
+        string output_path = release_dir + "/repo-metadata";
+        if (!write_text_file(output_path, metadata)) {
+            cout << "Failed to write metadata: " << output_path << "\n";
+            ok = false;
+            continue;
+        }
+
+        cout << "Synced metadata for " << source.release << " from " << source.base_url << "\n";
+    }
+
+    return ok;
+}
+
+bool clean_napt_cache() {
+    error_code ec;
+    if (!fs::exists(NAPT_CACHE_DIR, ec)) {
+        if (!fs::create_directories(NAPT_CACHE_DIR, ec)) {
+            cout << "Failed to create cache directory: " << NAPT_CACHE_DIR << "\n";
+            return false;
+        }
+        cout << "Cache is already clean.\n";
+        return true;
+    }
+
+    bool removed_any = false;
+    for (const auto& entry : fs::directory_iterator(NAPT_CACHE_DIR, ec)) {
+        if (ec) {
+            cout << "Failed to read cache directory: " << NAPT_CACHE_DIR << "\n";
+            return false;
+        }
+        fs::remove_all(entry.path(), ec);
+        if (ec) {
+            cout << "Failed to remove: " << entry.path().string() << "\n";
+            return false;
+        }
+        removed_any = true;
+    }
+
+    if (!fs::exists(NAPT_CACHE_DIR, ec) && !fs::create_directories(NAPT_CACHE_DIR, ec)) {
+        cout << "Failed to recreate cache directory: " << NAPT_CACHE_DIR << "\n";
+        return false;
+    }
+
+    if (removed_any) {
+        cout << "Cache cleaned: " << NAPT_CACHE_DIR << "\n";
+    } else {
+        cout << "Cache is already clean.\n";
+    }
+
+    return true;
+}
+
+void print_install_already_present_message(const string& pkg_name) {
+    cout << pkg_name << " is already installed. For upgrades, use napt upgrade "
+         << pkg_name << " or just napt upgrade. If it is a huge package, use --apply-host.\n";
+}
+
+vector<NaptRepoMetadata> load_cached_napt_metadata() {
+    vector<NaptRepoMetadata> repos;
+    vector<NaptSource> sources = load_napt_sources();
+
+    for (const auto& source : sources) {
+        string path = NAPT_ETC_DIR + "/" + source.release + "/repo-metadata";
+        string content;
+        if (!read_text_file(path, content)) {
+            continue;
+        }
+
+        NaptRepoMetadata metadata;
+        metadata.base_url = source.base_url;
+        metadata.release = source.release;
+        if (!parse_napt_repo_metadata(content, metadata)) {
+            continue;
+        }
+        if (metadata.release.empty()) {
+            metadata.release = source.release;
+        }
+        repos.push_back(metadata);
+    }
+
+    return repos;
+}
+
+int compare_versions(const string& a, const string& b) {
+    if (a.empty() && b.empty()) {
+        return 0;
+    }
+    if (a.empty()) {
+        return -1;
+    }
+    if (b.empty()) {
+        return 1;
+    }
+    if (_system != nullptr && _system->VS != nullptr) {
+        return _system->VS->CmpVersion(a.c_str(), b.c_str());
+    }
+    if (a == b) {
+        return 0;
+    }
+    return a < b ? -1 : 1;
+}
+
+string extract_napt_version(const string& pkg_name, const string& file_name) {
+    string base = path_basename(trim_copy(file_name));
+    if (!ends_with(base, ".deb")) {
+        return "";
+    }
+
+    string stem = base.substr(0, base.size() - 4);
+    string rest;
+    if (starts_with(stem, pkg_name + "_")) {
+        rest = stem.substr(pkg_name.size() + 1);
+    } else if (starts_with(stem, pkg_name + "-")) {
+        rest = stem.substr(pkg_name.size() + 1);
+    } else {
+        return "";
+    }
+
+    size_t split = rest.find_last_of('_');
+    if (split != string::npos && split > 0) {
+        return rest.substr(0, split);
+    }
+
+    split = rest.find_last_of('-');
+    if (split != string::npos && split > 0) {
+        return rest.substr(0, split);
+    }
+
+    return rest;
+}
+
+AptPackageState get_apt_package_state(pkgCacheFile& cache_file, const string& pkg_name) {
+    AptPackageState state;
+
+    pkgCache* cache = cache_file.GetPkgCache();
+    pkgDepCache* dep_cache = cache_file.GetDepCache();
+    if (cache == nullptr || dep_cache == nullptr) {
+        return state;
+    }
+
+    pkgCache::PkgIterator pkg = cache->FindPkg(pkg_name);
+    if (pkg.end()) {
+        return state;
+    }
+
+    state.found = true;
+    if (pkg->CurrentVer != 0) {
+        state.installed = true;
+        state.installed_version = pkg.CurrentVer().VerStr();
+    }
+
+    pkgCache::VerIterator cand = dep_cache->GetCandidateVersion(pkg);
+    if (!cand.end()) {
+        state.candidate_version = cand.VerStr();
+    }
+
+    return state;
+}
+
+NaptPackageCandidate find_best_napt_candidate(const vector<NaptRepoMetadata>& repos, const string& pkg_name) {
+    NaptPackageCandidate best;
+
+    for (const auto& repo : repos) {
+        auto it = repo.packages.find(pkg_name);
+        if (it == repo.packages.end()) {
+            continue;
+        }
+
+        NaptPackageCandidate candidate;
+        candidate.found = true;
+        candidate.base_url = repo.base_url;
+        candidate.release = repo.release;
+        candidate.file_name = it->second;
+        candidate.version = extract_napt_version(pkg_name, it->second);
+
+        if (!best.found || compare_versions(candidate.version, best.version) > 0) {
+            best = candidate;
+        }
+    }
+
+    return best;
+}
+
+string build_napt_download_url(const NaptPackageCandidate& candidate) {
+    string file_name = trim_copy(candidate.file_name);
+    while (!file_name.empty() && file_name.front() == '/') {
+        file_name.erase(file_name.begin());
+    }
+    return candidate.base_url + "/releases/" + candidate.release + "/" + file_name;
+}
+
+bool cache_napt_package(const NaptPackageCandidate& candidate, string& local_path) {
+    string release_dir = NAPT_CACHE_DIR + "/" + candidate.release;
+    if (run_cmd("mkdir -p " + shell_quote(release_dir)) != 0) {
+        return false;
+    }
+
+    local_path = release_dir + "/" + path_basename(candidate.file_name);
+    string url = build_napt_download_url(candidate);
+    return run_cmd("curl -fsSL -o " + shell_quote(local_path) + " " + shell_quote(url)) == 0;
+}
+
+string build_apt_install_args_cmd(const vector<string>& args, bool quiet) {
+    if (args.empty()) {
+        return "";
+    }
+
+    string cmd = "DEBIAN_FRONTEND=noninteractive apt-get ";
+    if (quiet) {
+        cmd += "-qq ";
+    }
+    cmd += "-y install";
+
+    for (const auto& arg : args) {
+        cmd += " ";
+        cmd += shell_quote(arg);
+    }
+
+    return cmd;
+}
+
+bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet) {
+    if (pkgs.empty()) {
+        if (!quiet) {
+            cout << "No packages were specified.\n";
+        }
+        return false;
+    }
+
+    pkgCacheFile cache_file;
+    vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
+    bool had_error = false;
+
+    for (const auto& pkg_name : pkgs) {
+        AptPackageState apt_state = get_apt_package_state(cache_file, pkg_name);
+        NaptPackageCandidate napt_candidate = find_best_napt_candidate(repos, pkg_name);
+
+        if (!apt_state.found && !napt_candidate.found) {
+            if (!quiet) {
+                cout << "Package " << pkg_name << " not found.\n";
+            }
+            had_error = true;
+            continue;
+        }
+
+        bool use_napt = false;
+        if (napt_candidate.found) {
+            if (!apt_state.found || apt_state.candidate_version.empty()) {
+                use_napt = true;
+            } else if (compare_versions(napt_candidate.version, apt_state.candidate_version) > 0) {
+                use_napt = true;
+            }
+        }
+
+        if (use_napt) {
+            print_napt_repo_warning();
+            if (apt_state.installed && compare_versions(apt_state.installed_version, napt_candidate.version) >= 0) {
+                if (!quiet) {
+                    print_install_already_present_message(pkg_name);
+                }
+                continue;
+            }
+
+            string local_path;
+            if (!cache_napt_package(napt_candidate, local_path)) {
+                if (!quiet) {
+                    cout << "Failed to download Napt package for " << pkg_name << ".\n";
+                }
+                had_error = true;
+                continue;
+            }
+
+            InstallDecision decision;
+            decision.package_name = pkg_name;
+            decision.apt_argument = local_path;
+            decision.selected_version = napt_candidate.version;
+            decision.from_napt = true;
+            decisions.push_back(decision);
+
+            if (!quiet) {
+                cout << "Using Napt package for " << pkg_name;
+                if (!napt_candidate.version.empty()) {
+                    cout << " (" << napt_candidate.version << ")";
+                }
+                cout << ".\n";
+            }
+            continue;
+        }
+
+        if (!apt_state.found || apt_state.candidate_version.empty()) {
+            if (!quiet) {
+                cout << "Package " << pkg_name << " not found.\n";
+            }
+            had_error = true;
+            continue;
+        }
+
+        if (apt_state.installed && compare_versions(apt_state.installed_version, apt_state.candidate_version) >= 0) {
+            if (!quiet) {
+                print_install_already_present_message(pkg_name);
+            }
+            continue;
+        }
+
+        InstallDecision decision;
+        decision.package_name = pkg_name;
+        decision.apt_argument = pkg_name;
+        decision.selected_version = apt_state.candidate_version;
+        decision.from_napt = false;
+        decisions.push_back(decision);
+
+        if (!quiet) {
+            cout << "Using Debian package for " << pkg_name;
+            if (!apt_state.candidate_version.empty()) {
+                cout << " (" << apt_state.candidate_version << ")";
+            }
+            cout << ".\n";
+        }
+    }
+
+    return !had_error;
+}
+
+string normalize_repo_deb_url(const string& raw_url) {
+    string url = trim_copy(raw_url);
+    if (url.find("http://") != 0 && url.find("https://") != 0) {
+        url = "https://" + url;
+    }
+    if (url.size() < 4 || url.substr(url.size() - 4) != ".deb") {
+        return "";
+    }
+
+    const string pages_prefix = "https://nextferretdur.github.io/repo-nflinux-";
+    if (starts_with(url, pages_prefix)) {
+        string suffix = url.substr(pages_prefix.size());
+        size_t slash = suffix.find('/');
+        if (slash == string::npos || slash == 0 || slash == suffix.size() - 1) {
+            return "";
+        }
+        for (size_t i = 0; i < slash; ++i) {
+            if (!isdigit(static_cast<unsigned char>(suffix[i]))) {
+                return "";
+            }
+        }
+        return url;
+    }
+
+    return "";
+}
+
+void do_nflinux_upgrade() {
+#ifdef nflinux
+    string os_release = fetch_url("https://nextferret.github.io/etc/os-release");
+    if (!os_release.empty()) {
+        ofstream out("/etc/os-release");
+        out << os_release;
+        out.close();
+    }
+
+    string p2i = fetch_url("https://nextferret.github.io/packages-to-install");
+    if (p2i.empty()) {
+        p2i = fetch_url("https://nextferret.github.io/etc/packages-to-install");
+    }
+    if (!p2i.empty()) {
+        stringstream ss(p2i);
+        string line;
+        run_cmd("mkdir -p /tmp/nf-tree-debs");
+        while (getline(ss, line)) {
+            line = trim_copy(line);
+            if (line.empty()) {
+                continue;
+            }
+
+            size_t pos = line.find("->");
+            bool is_arrow = true;
+            if (pos == string::npos) {
+                pos = line.find("\xe2\x86\x92");
+                is_arrow = false;
+            }
+            if (pos != string::npos) {
+                string pkg = trim_copy(line.substr(0, pos));
+                string url = normalize_repo_deb_url(line.substr(pos + (is_arrow ? 2 : 3)));
+                if (pkg.empty() || url.empty()) {
+                    continue;
+                }
+                string deb_path = "/tmp/nf-tree-debs/" + pkg + ".deb";
+                if (run_cmd("curl -fsSL -o " + shell_quote(deb_path) + " " + shell_quote(url)) != 0) {
+                    cout << "Download of " << pkg << " failed.\n";
+                    continue;
+                }
+                create_snapshot("apt-pre");
+                if (run_cmd("apt-get install -y " + shell_quote(deb_path)) == 0) {
+                    create_snapshot("apt-post");
+                } else {
+                    cout << "Installation of " << pkg << " failed. Initiating rollback.\n";
+                    do_rollback("apt-pre");
+                }
+            }
+        }
+    }
+#endif
+}
+
+bool do_libapt_transaction(const string& action, const vector<string>& pkgs, bool quiet) {
+    string cmd = build_apt_cmd(action, pkgs, quiet);
+    if (cmd.empty()) {
+        if (!quiet) {
+            cout << "Invalid transaction request.\n";
+        }
+        return false;
+    }
+    return run_cmd(cmd) == 0;
+}
+
+bool do_command_transaction(const string& cmd) {
+    if (cmd.empty()) {
+        return false;
+    }
+    return run_cmd(cmd) == 0;
+}
+
+void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
+    if (!apply_host) {
+        manage_sandbox("create");
+        mount_fs();
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (chroot(TREE_ROOT.c_str()) != 0 || chdir("/") != 0) {
+                exit(1);
+            }
+            int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (null_fd != -1) {
+                dup2(null_fd, STDOUT_FILENO);
+                dup2(null_fd, STDERR_FILENO);
+                close(null_fd);
+            }
+            pkgInitConfig(*_config);
+            pkgInitSystem(*_config, _system);
+            bool res = do_command_transaction(transaction_cmd);
+            exit(res ? 0 : 1);
+        } else if (pid > 0) {
+            int status = 0;
+            bool waited = wait_for_child(pid, status);
+            umount_fs();
+            manage_sandbox("delete");
+            if (!waited) {
+                cout << "Sandbox test interrupted. Aborting transaction.\n";
+                return;
+            }
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                cout << "Sandbox test failed. Aborting transaction.\n";
+                return;
+            }
+            cout << "Sandbox test successful. Applying to host...\n";
+            cout << "Do you want to apply the transaction to the host system?\n";
+            cout << "This action cannot be undone without rollback if it fails.\n";
+            cout << "Type 'yes' to confirm or anything else to abort: ";
+            string confirm;
+            getline(cin, confirm);
+            if (confirm != "yes" && confirm != "YES") {
+                cout << "Transaction aborted by user.\n";
+                return;
+            }
+        } else {
+            cout << "Fork failed for sandbox test.\n";
+            return;
+        }
+    }
+
+    bool snapshot_created = create_snapshot("apt-pre");
+    bool res = do_command_transaction(transaction_cmd);
+    if (res) {
+        create_snapshot("apt-post");
+        cout << "Transaction applied successfully.\n";
+    } else {
+        cout << "Host transaction failed. Rolling back...\n";
+        if (snapshot_created) {
+            do_rollback("apt-pre");
+        }
+    }
+}
+
+void perform_transaction(const string& action, const vector<string>& pkgs, bool apply_host) {
+    PrecheckResult precheck = precheck_transaction(action, pkgs, false);
+    if (precheck == PrecheckResult::Failed || precheck == PrecheckResult::NoChanges) {
+        return;
+    }
+
+    string transaction_cmd = build_apt_cmd(action, pkgs, false);
+    if (transaction_cmd.empty()) {
+        cout << "Invalid transaction request.\n";
+        return;
+    }
+
+    perform_transaction_cmd(transaction_cmd, apply_host);
+}
+
+void perform_install_transaction(const vector<string>& pkgs, bool apply_host) {
+    vector<InstallDecision> decisions;
+    if (!resolve_install_decisions(pkgs, decisions, false)) {
+        return;
+    }
+
+    if (decisions.empty()) {
+        return;
+    }
+
+    vector<string> args;
+    for (const auto& decision : decisions) {
+        args.push_back(decision.apt_argument);
+    }
+
+    string transaction_cmd = build_apt_install_args_cmd(args, false);
+    if (transaction_cmd.empty()) {
+        cout << "Invalid transaction request.\n";
+        return;
+    }
+
+    perform_transaction_cmd(transaction_cmd, apply_host);
+}
+
+void perform_upgrade_transaction(const vector<string>& pkgs, bool apply_host) {
+    if (pkgs.empty()) {
+        perform_transaction("upgrade", pkgs, apply_host);
+        return;
+    }
+
+    perform_install_transaction(pkgs, apply_host);
+}
+
+int main(int argc, char** argv) {
+    pkgInitConfig(*_config);
+    pkgInitSystem(*_config, _system);
+
+    string command;
+    vector<string> pkgs;
+    bool apply_host = false;
+
+    for (int i = 1; i < argc; ++i) {
+        string arg = argv[i];
+        if (arg == "-h") {
+            show_help();
+            return 0;
+        } else if (arg == "--v") {
+            cout << "napt 1.0\n";
+            return 0;
+        } else if (arg == "--vb") {
+            _config->Set("Debug::pkgAcquire", "true");
+        } else if (arg == "--apply-host") {
+            apply_host = true;
+        } else if (command.empty() && arg[0] != '-') {
+            command = arg;
+        } else if (arg[0] != '-') {
+            pkgs.push_back(arg);
+        }
+    }
+
+    if (command.empty()) {
+        show_help();
+        return 0;
+    }
+
+    if (geteuid() != 0) {
+        cout << "Root privileges required.\n";
+        return 1;
+    }
+
+    if (command == "sync") {
+        int apt_rc = run_cmd("apt-get update");
+        bool napt_ok = sync_napt_metadata();
+        return (apt_rc == 0 && napt_ok) ? 0 : 1;
+    } else if (command == "clean") {
+        return clean_napt_cache() ? 0 : 1;
+    } else if (command == "dist-upgrade") {
+#ifdef nflinux
+        do_nflinux_upgrade();
+#else
+        perform_transaction("dist-upgrade", pkgs, apply_host);
+#endif
+    } else if (command == "install") {
+        perform_install_transaction(pkgs, apply_host);
+    } else if (command == "upgrade") {
+        perform_upgrade_transaction(pkgs, apply_host);
+    } else if (command == "remove" || command == "purge") {
+        perform_transaction(command, pkgs, apply_host);
+    } else {
+        cout << "Unknown command: " << command << "\n";
+        show_help();
+        return 1;
+    }
+
+    return 0;
+}
