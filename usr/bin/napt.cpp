@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <set>
 #include <fcntl.h>
 #include <thread>
 #include <atomic>
@@ -1481,32 +1482,88 @@ void perform_global_upgrade(bool apply_host) {
 
     vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
     vector<string> napt_upgrade_args;
-    for (pkgCache::PkgIterator pkg = cache->PkgBegin(); !pkg.end(); ++pkg) {
-        if (pkg->CurrentVer == 0) {
-            continue;
-        }
 
-        string pkg_name = pkg.Name();
-        AptPackageState apt_state = get_apt_package_state(cache_file, pkg_name);
-        NaptPackageCandidate napt_candidate = find_best_napt_candidate(repos, pkg_name);
+    auto get_installed_version = [&](const string& pkg_name) -> string {
+        AptPackageState s = get_apt_package_state(cache_file, pkg_name);
+        return s.installed ? s.installed_version : "";
+    };
 
-        if (napt_candidate.found && compare_versions(napt_candidate.version, apt_state.installed_version) > 0) {
-            print_napt_repo_warning(napt_candidate.base_url);
-            string local_path;
-            if (cache_napt_package(napt_candidate, local_path)) {
-                bool checksum_ok = true;
-                if (!napt_candidate.sha256.empty()) {
-                    string local_hash = calculate_sha256(local_path);
-                    if (local_hash != napt_candidate.sha256) {
-                        checksum_ok = false;
-                        run_cmd("rm -f " + shell_quote(local_path));
-                    }
-                }
-                if (checksum_ok) {
-                    napt_upgrade_args.push_back(local_path);
-                }
+    auto try_queue_napt_upgrade = [&](const string& pkg_name, const string& installed_version) {
+        NaptPackageCandidate candidate = find_best_napt_candidate(repos, pkg_name);
+        if (!candidate.found) return;
+        if (!installed_version.empty() && compare_versions(candidate.version, installed_version) <= 0) return;
+        string local_path;
+        if (!cache_napt_package(candidate, local_path)) return;
+        if (!candidate.sha256.empty()) {
+            string h = calculate_sha256(local_path);
+            if (h != candidate.sha256) {
+                run_cmd("rm -f " + shell_quote(local_path));
+                cout << "Checksum mismatch for " << pkg_name << ", skipping.\n";
+                return;
             }
         }
+        cout << "Queuing napt upgrade: " << pkg_name;
+        if (!installed_version.empty()) cout << " (" << installed_version << " -> " << candidate.version << ")";
+        else cout << " (" << candidate.version << ")";
+        cout << "\n";
+        napt_upgrade_args.push_back(local_path);
+    };
+
+    set<string> handled_pkgs;
+
+    for (const auto& repo : repos) {
+        if (repo.required_packages.empty()) continue;
+
+        string already_installed_req;
+        for (const auto& req : repo.required_packages) {
+            string v = get_installed_version(req);
+            if (!v.empty()) {
+                already_installed_req = req;
+                break;
+            }
+        }
+
+        if (!already_installed_req.empty()) {
+            string iv = get_installed_version(already_installed_req);
+            try_queue_napt_upgrade(already_installed_req, iv);
+            handled_pkgs.insert(already_installed_req);
+        } else {
+            bool installed_one = false;
+            for (const auto& req : repo.required_packages) {
+                NaptPackageCandidate c = find_best_napt_candidate(repos, req);
+                if (c.found) {
+                    cout << "Installing required package: " << req << "\n";
+                    perform_install_transaction({req}, apply_host);
+                    handled_pkgs.insert(req);
+                    installed_one = true;
+                    break;
+                }
+                AptPackageState apt_state = get_apt_package_state(cache_file, req);
+                if (apt_state.found) {
+                    cout << "Installing required package: " << req << "\n";
+                    perform_install_transaction({req}, apply_host);
+                    handled_pkgs.insert(req);
+                    installed_one = true;
+                    break;
+                }
+            }
+            if (!installed_one) {
+                cout << "Warning: could not install any required package (";
+                for (size_t i = 0; i < repo.required_packages.size(); ++i) {
+                    if (i) cout << ", ";
+                    cout << repo.required_packages[i];
+                }
+                cout << "). Falling back to apt upgrade.\n";
+            }
+        }
+    }
+
+    for (pkgCache::PkgIterator pkg = cache->PkgBegin(); !pkg.end(); ++pkg) {
+        if (pkg->CurrentVer == 0) continue;
+        string pkg_name = pkg.Name();
+        if (handled_pkgs.count(pkg_name)) continue;
+        AptPackageState apt_state = get_apt_package_state(cache_file, pkg_name);
+        try_queue_napt_upgrade(pkg_name, apt_state.installed_version);
     }
 
     if (!napt_upgrade_args.empty()) {
