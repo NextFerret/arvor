@@ -24,7 +24,8 @@ FILES = [
     "/usr/share/nextferret/credits",
     "/usr/bin/apt-nf-tree",
     "/etc/napt/sources.list",
-    "/usr/bin/nlc"
+    "/usr/bin/nlc",
+    "/usr/bin/nsmd_start"
 ]
 
 STYLES = """
@@ -405,7 +406,7 @@ fi
 dpkg-divert --add --package nextferret-core --rename --divert /usr/bin/old-apt /usr/bin/apt
 ln -sf /usr/bin/napt /usr/bin/apt
 
-apt-get install -y --no-install-recommends python3 linux-image-amd64 sudo network-manager firmware-linux grub-efi-amd64-signed shim-signed locales keyboard-configuration console-setup ca-certificates plymouth plymouth-themes btrfs-progs grub-common gawk inotify-tools git make efibootmgr curl xz-utils
+apt-get install -y --no-install-recommends  debootstrap python3 linux-image-amd64 sudo network-manager firmware-linux grub-efi-amd64-signed shim-signed locales keyboard-configuration console-setup ca-certificates plymouth plymouth-themes btrfs-progs grub-common gawk inotify-tools git make efibootmgr curl xz-utils
 
 sed -i "s/^# *{self.sys_locale}/{self.sys_locale}/" /etc/locale.gen || true
 locale-gen || true
