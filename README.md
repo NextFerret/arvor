@@ -66,4 +66,10 @@ anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
 
 `nlc` : chroot manager ← js added because i need a way more simplier to mount the chroot of this distro :3
 
-that was it.
+# Minimum Requirements
+
+32 GB of SSD/HDD
+
+Any Modern CPU (15+ years)
+
+4 GB of RAM.
