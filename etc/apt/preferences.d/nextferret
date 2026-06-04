@@ -1,3 +1,0 @@
-Package: snapd  ostree
-Pin: release *
-Pin-Priority: -1
