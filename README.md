@@ -1,37 +1,69 @@
-<img width="3352" height="752" alt="NextFerret (2)" src="https://github.com/user-attachments/assets/51453e51-8885-4f76-9626-f3a9cb4e87bd" />
+<img width="3352" height="752" alt="The" src="https://github.com/user-attachments/assets/9edd72f1-a4c5-49da-ac38-6cd835661797" />
 
----
-THE SYSTEM IS IN A UNSTABLE AND TESTING STATE.
----
----
-# NextFerret Linux:The Future Is Atomic And Mutable
-NextFerret Linux is an Operational System made by NextFerret,It uses `btrfs` as its own FileSystem.
-unlike "Atomic" Distros,that uses Immutability as reason to have "Atomic Features",We Defend the WaLinux (or Walin) Philosophy.
-# The Wa Linux Philosophy.
-The Wa Linux Philosophy
-Inspired by the principle of Wa (和), we believe that a truly open system is one where every component exists in perfect balance.
+# Arvor Linux : When Atomicity Meets Mutability.
 
-In the Linux context, this means that every core element—whether it is nlc, nsm, or napt—must function in harmony, free from the constraints of a locked-in root. We reject the silos that break the flow of the system.
+## We Are Switching to XFS and LVM in the version 4.1,the versions 3.1 and 4 are the LAST with BTRFS-Based Solutions,this was given because of rollbacking-ish issues,and XFS gives us more stability.
+Arvor Linux is an Debian-Based Atomic&Mutable Solution.
 
-In this environment, you hold the ultimate power:
+You may say "IT IS IMPOSSIBLE,IMMUTABLE = ATOMIC"
 
-The power to Enforce the Harmony
+Wrong,lets start **The ✨ Annoying ✨ and ✨ Useless ✨ Dictionary Moment**
 
-The power to Destroy the Harmony
-# The Components ;_;
-nsm: the snapshot manager
 
-napt: the apt's atomic remix
 
-nlc: NextFerret Linux Chroot Manager.
-# Requirements (spoiler:CLI runs on a potato compuiter)
-- AMD64 with 3+ Cores
-- 4 GB of ram
-- 1,8 GB of Free Space (estimated)
-# Installer's Languages:
-- Galego
-- Português (Brasil)
-- English
-- Français
-- Deutcsh
-and i prob forgot some ;_;
+atomicity (noun)
+
+Pronunciation: /ˌætəˈmɪsəti/
+
+Meaning:
+
+(computing) The property of an operation or transaction being completed entirely or not at all, with no intermediate state visible.
+The quality of being atomic; indivisibility.
+
+Examples:
+
+The database guarantees atomicity for all transactions.
+Atomicity helps prevent data corruption during system updates.
+
+Related words:
+
+atomic (adjective)
+atomically (adverb)
+
+Plural: atomicities (rare)
+
+immutability (noun)
+
+Pronunciation: /ɪˌmjuːtəˈbɪləti/
+
+Meaning:
+
+The quality of being unable to be changed.
+(computing) The property of an object, file, or system state that cannot be modified after it is created.
+
+Examples:
+
+Immutability is a key feature of many functional programming languages.
+The operating system uses immutability to protect the user from itself.
+
+Related words:
+
+immutable (adjective)
+immutably (adverb)
+
+Plural: immutabilities (rare)
+
+...SEE?
+
+its not the same thing.
+anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
+
+# Core Programs:
+
+`nsm` : the snapshot manager of Arvor
+
+`napt` : the atomic version of nat
+
+`nlc` : chroot manager ← js added because i need a way more simplier to mount the chroot of this distro :3
+
+that was it.
