@@ -62,7 +62,7 @@ anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
 
 `nsm` : the snapshot manager of Arvor
 
-`napt` : the atomic version of nat
+`napt` : the atomic version of apt
 
 `nlc` : chroot manager ← js added because i need a way more simplier to mount the chroot of this distro :3
 
