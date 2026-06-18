@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,35 +7,64 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
 #include <time.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>
 
-#define SNAPSHOT_BASE    "/nsm/snapshots"
-#define AUTO_DIR         "/nsm/snapshots/auto"
-#define DAEMON_AUTO_DIR  "/nsm/snapshots/auto/daemon"
-#define MANUAL_DIR       "/nsm/snapshots/manual"
-#define ROOT_SOURCE      "/"
-#define HOME_SOURCE      "/home"
-#define BTRFS_TEMP_MOUNT "/mnt/nsm-pool"
-#define CMD_BUF          4096
-#define STR_BUF          512
-#define PATH_BUF         1024
+#define SNAPSHOT_BASE           "/nsm/snapshots"
+#define AUTO_DIR                "/nsm/snapshots/auto"
+#define DAEMON_AUTO_DIR         "/nsm/snapshots/auto/daemon"
+#define MANUAL_DIR              "/nsm/snapshots/manual"
+#define ROOT_SOURCE             "/"
+#define HOME_SOURCE             "/home"
+#define CMD_BUF                 4096
+#define STR_BUF                 512
+#define PATH_BUF                1024
+#define META_FILE               "meta"
 
 typedef struct {
-    int  rc;
+    int rc;
     char out[8192];
 } CmdResult;
 
 typedef struct {
-    char source[STR_BUF];
-    char subvol[STR_BUF];
-} BtrfsMount;
+    char vg[STR_BUF];
+    char lv[STR_BUF];
+    char lvpath[PATH_BUF];
+    char segtype[STR_BUF];
+    bool is_thin;
+} LvmInfo;
 
-static CmdResult run_cmd(const char *cmd)
+typedef struct {
+    char kind[16];
+    char type[16];
+    char name[STR_BUF];
+    char timestamp[64];
+    char origin_mount[PATH_BUF];
+    char origin_source[PATH_BUF];
+    char origin_vg[STR_BUF];
+    char origin_lv[STR_BUF];
+    char origin_lvpath[PATH_BUF];
+    char snapshot_lvpath[PATH_BUF];
+} SnapshotMeta;
+
+static void trim(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
+    size_t i = 0;
+    while (s[i] && isspace((unsigned char)s[i])) i++;
+    if (i > 0) memmove(s, s + i, strlen(s + i) + 1);
+}
+
+static CmdResult run_cmdv(const char *fmt, va_list ap)
 {
     CmdResult r = {-1, ""};
+    char cmd[CMD_BUF];
+    vsnprintf(cmd, sizeof(cmd), fmt, ap);
     char full[CMD_BUF];
     snprintf(full, sizeof(full), "%s 2>&1", cmd);
     FILE *p = popen(full, "r");
@@ -49,29 +77,19 @@ static CmdResult run_cmd(const char *cmd)
     return r;
 }
 
-static void decode_octal_field(const char *in, char *out, size_t sz)
+static CmdResult run_cmdf(const char *fmt, ...)
 {
-    size_t i = 0, j = 0;
-    while (in[i] && j + 1 < sz) {
-        if (in[i] == '\\' && isdigit((unsigned char)in[i+1])
-                          && isdigit((unsigned char)in[i+2])
-                          && isdigit((unsigned char)in[i+3])) {
-            char oct[4] = { in[i+1], in[i+2], in[i+3], '\0' };
-            out[j++] = (char)strtol(oct, NULL, 8);
-            i += 4;
-        } else {
-            out[j++] = in[i++];
-        }
-    }
-    out[j] = '\0';
+    va_list ap;
+    va_start(ap, fmt);
+    CmdResult r = run_cmdv(fmt, ap);
+    va_end(ap);
+    return r;
 }
 
-static bool path_has_prefix(const char *base, const char *path)
+static void shell(const char *cmd)
 {
-    size_t n = strlen(base);
-    if (strcmp(base, "/") == 0) return path[0] == '/';
-    if (strncmp(base, path, n) != 0) return false;
-    return path[n] == '\0' || path[n] == '/';
+    int r = system(cmd);
+    (void)r;
 }
 
 static bool ensure_dir(const char *path)
@@ -90,287 +108,284 @@ static bool ensure_dir(const char *path)
     return mkdir(tmp, 0755) == 0 || errno == EEXIST;
 }
 
-static void parent_path(const char *path, char *out, size_t sz)
+static bool read_mount_field(const char *target, const char *field, char *out, size_t sz)
 {
-    snprintf(out, sz, "%s", path);
-    char *sl = strrchr(out, '/');
-    if (!sl) { snprintf(out, sz, "."); return; }
-    if (sl == out) { sl[1] = '\0'; return; }
-    *sl = '\0';
-}
-
-static bool resolve_btrfs_mount(const char *target, BtrfsMount *m)
-{
-    FILE *f = fopen("/proc/self/mountinfo", "r");
-    if (!f) return false;
-
-    char line[4096];
-    char best_mp[STR_BUF] = "";
-    char best_root[STR_BUF] = "";
-    char best_src[STR_BUF] = "";
-    size_t best_len = 0;
-
-    while (fgets(line, sizeof(line), f)) {
-        char *sep = strstr(line, " - ");
-        if (!sep) continue;
-        *sep = '\0';
-        char *post = sep + 3;
-
-        char root_raw[STR_BUF], mp_raw[STR_BUF], fstype[64], src_raw[STR_BUF];
-        if (sscanf(line, "%*s %*s %*s %511s %511s", root_raw, mp_raw) != 2) continue;
-        if (sscanf(post, "%63s %511s", fstype, src_raw) != 2) continue;
-        if (strcmp(fstype, "btrfs") != 0) continue;
-
-        char mp[STR_BUF], root[STR_BUF], src[STR_BUF];
-        decode_octal_field(mp_raw, mp, sizeof(mp));
-        decode_octal_field(root_raw, root, sizeof(root));
-        decode_octal_field(src_raw, src, sizeof(src));
-
-        if (!path_has_prefix(mp, target)) continue;
-        size_t mp_len = strlen(mp);
-        if (mp_len >= best_len) {
-            best_len = mp_len;
-            snprintf(best_mp,   sizeof(best_mp),   "%s", mp);
-            snprintf(best_root, sizeof(best_root), "%s", root);
-            snprintf(best_src,  sizeof(best_src),  "%s", src);
-        }
-    }
-    fclose(f);
-    if (best_len == 0) return false;
-
-    const char *rel = (strcmp(best_mp, "/") == 0)
-        ? (target[0] == '/' ? target + 1 : target)
-        : (target + best_len + (target[best_len] == '/' ? 1 : 0));
-
-    const char *root_rel = best_root[0] == '/' ? best_root + 1 : best_root;
-
-    if (*root_rel && *rel)
-        snprintf(m->subvol, sizeof(m->subvol), "%s/%s", root_rel, rel);
-    else if (*root_rel)
-        snprintf(m->subvol, sizeof(m->subvol), "%s", root_rel);
-    else
-        snprintf(m->subvol, sizeof(m->subvol), "%s", rel);
-
-    snprintf(m->source, sizeof(m->source), "%s", best_src);
+    CmdResult r = run_cmdf("findmnt -no %s --target %s", field, target);
+    if (r.rc != 0) return false;
+    trim(r.out);
+    if (r.out[0] == '\0') return false;
+    snprintf(out, sz, "%s", r.out);
     return true;
 }
 
-static void shell(const char *cmd)
+static bool resolve_lvm_info(const char *source, LvmInfo *info)
 {
-    int r = system(cmd);
-    (void)r;
+    CmdResult r = run_cmdf("lvs --noheadings --separator / -o vg_name,lv_name,segtype %s", source);
+    if (r.rc != 0) return false;
+    trim(r.out);
+    if (r.out[0] == '\0') return false;
+    char vg[STR_BUF] = "", lv[STR_BUF] = "", seg[STR_BUF] = "";
+    if (sscanf(r.out, "%511[^/]/%511[^/]/%511s", vg, lv, seg) != 3) return false;
+    trim(vg);
+    trim(lv);
+    trim(seg);
+    if (vg[0] == '\0' || lv[0] == '\0' || seg[0] == '\0') return false;
+    snprintf(info->vg, sizeof(info->vg), "%s", vg);
+    snprintf(info->lv, sizeof(info->lv), "%s", lv);
+    snprintf(info->segtype, sizeof(info->segtype), "%s", seg);
+    snprintf(info->lvpath, sizeof(info->lvpath), "/dev/%s/%s", vg, lv);
+    info->is_thin = strstr(seg, "thin") != NULL;
+    return true;
 }
 
-static void toggle_swap(bool on)
+static bool snapshot_mount_fstype(const char *mountpoint)
 {
-    if (!on) { shell("swapoff -a > /dev/null 2>&1"); return; }
-    if (access("/dev/zram0", F_OK) == 0) {
-        shell("mkswap /dev/zram0 > /dev/null 2>&1");
-        shell("swapon /dev/zram0 -p 100 > /dev/null 2>&1");
-    } else {
-        shell("swapon -a > /dev/null 2>&1");
+    char fstype[64];
+    if (!read_mount_field(mountpoint, "FSTYPE", fstype, sizeof(fstype))) return false;
+    return strcmp(fstype, "xfs") == 0 || strcmp(fstype, "ext4") == 0
+        || strcmp(fstype, "ext3") == 0 || strcmp(fstype, "btrfs") == 0;
+}
+
+static bool freeze_mount(const char *mountpoint)
+{
+    return run_cmdf("fsfreeze -f %s", mountpoint).rc == 0;
+}
+
+static void unfreeze_mount(const char *mountpoint)
+{
+    run_cmdf("fsfreeze -u %s", mountpoint);
+}
+
+static bool write_snapshot_meta(const char *dir, const SnapshotMeta *meta)
+{
+    char path[PATH_BUF];
+    snprintf(path, sizeof(path), "%s/%s", dir, META_FILE);
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "kind=%s\n", meta->kind);
+    fprintf(f, "type=%s\n", meta->type);
+    fprintf(f, "name=%s\n", meta->name);
+    fprintf(f, "timestamp=%s\n", meta->timestamp);
+    fprintf(f, "origin_mount=%s\n", meta->origin_mount);
+    fprintf(f, "origin_source=%s\n", meta->origin_source);
+    fprintf(f, "origin_vg=%s\n", meta->origin_vg);
+    fprintf(f, "origin_lv=%s\n", meta->origin_lv);
+    fprintf(f, "origin_lvpath=%s\n", meta->origin_lvpath);
+    fprintf(f, "snapshot_lvpath=%s\n", meta->snapshot_lvpath);
+    fclose(f);
+    return true;
+}
+
+static bool read_snapshot_meta(const char *dir, SnapshotMeta *meta)
+{
+    memset(meta, 0, sizeof(*meta));
+    char path[PATH_BUF];
+    snprintf(path, sizeof(path), "%s/%s", dir, META_FILE);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[PATH_BUF * 2];
+    while (fgets(line, sizeof(line), f)) {
+        trim(line);
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = line;
+        char *val = eq + 1;
+        if (strcmp(key, "kind") == 0) snprintf(meta->kind, sizeof(meta->kind), "%s", val);
+        else if (strcmp(key, "type") == 0) snprintf(meta->type, sizeof(meta->type), "%s", val);
+        else if (strcmp(key, "name") == 0) snprintf(meta->name, sizeof(meta->name), "%s", val);
+        else if (strcmp(key, "timestamp") == 0) snprintf(meta->timestamp, sizeof(meta->timestamp), "%s", val);
+        else if (strcmp(key, "origin_mount") == 0) snprintf(meta->origin_mount, sizeof(meta->origin_mount), "%s", val);
+        else if (strcmp(key, "origin_source") == 0) snprintf(meta->origin_source, sizeof(meta->origin_source), "%s", val);
+        else if (strcmp(key, "origin_vg") == 0) snprintf(meta->origin_vg, sizeof(meta->origin_vg), "%s", val);
+        else if (strcmp(key, "origin_lv") == 0) snprintf(meta->origin_lv, sizeof(meta->origin_lv), "%s", val);
+        else if (strcmp(key, "origin_lvpath") == 0) snprintf(meta->origin_lvpath, sizeof(meta->origin_lvpath), "%s", val);
+        else if (strcmp(key, "snapshot_lvpath") == 0) snprintf(meta->snapshot_lvpath, sizeof(meta->snapshot_lvpath), "%s", val);
     }
+    fclose(f);
+    return meta->kind[0] != '\0' && meta->snapshot_lvpath[0] != '\0';
 }
 
-static void update_grub(void)
+static void remove_snapshot_meta(const char *dir)
 {
-    shell("update-grub > /dev/null 2>&1");
+    char path[PATH_BUF];
+    snprintf(path, sizeof(path), "%s/%s", dir, META_FILE);
+    unlink(path);
+    rmdir(dir);
 }
 
-static void setup_dirs(void)
+static bool create_snapshot(const char *mountpoint, const char *prefix, const char *type, const char *name)
 {
-    mkdir("/nsm", 0755);
-    mkdir(SNAPSHOT_BASE, 0755);
-    mkdir(AUTO_DIR, 0755);
-    mkdir(DAEMON_AUTO_DIR, 0755);
-    mkdir(MANUAL_DIR, 0755);
-}
-
-static bool is_auto_name(const char *name)
-{
-    if (strcmp(name, "nftreedaemon") == 0) return true;
-    for (const char *p = name; (p = strstr(p, "apt")) != NULL; p++) {
-        bool pre = (p == name || !isalnum((unsigned char)p[-1]));
-        bool post = (p[3] == '\0' || !isalnum((unsigned char)p[3]));
-        if (pre && post) return true;
+    char source[PATH_BUF];
+    if (!read_mount_field(mountpoint, "SOURCE", source, sizeof(source))) {
+        printf("Error: cannot resolve source for %s.\n", mountpoint);
+        return false;
     }
-    return false;
-}
-
-static const char *snapshot_dir(const char *name, const char *type)
-{
-    if (strcmp(name, "nftreedaemon") == 0) return DAEMON_AUTO_DIR;
-    return strcmp(type, "auto") == 0 ? AUTO_DIR : MANUAL_DIR;
-}
-
-static bool create_snapshot(const char *src, const char *prefix,
-                             const char *type, const char *name)
-{
+    if (!snapshot_mount_fstype(mountpoint)) {
+        printf("Error: %s filesystem is not supported (xfs/ext4/ext3/btrfs required).\n", mountpoint);
+        return false;
+    }
+    LvmInfo info;
+    if (!resolve_lvm_info(source, &info)) {
+        printf("Error: %s is not an LVM volume or cannot be resolved.\n", mountpoint);
+        return false;
+    }
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     char ts[64];
     strftime(ts, sizeof(ts), "%Y-%m-%d_%H-%M-%S", tm);
-
-    char filename[STR_BUF];
-    snprintf(filename, sizeof(filename), "%s-%s-%s-%s", prefix, type, name, ts);
-
-    char dest[PATH_BUF];
-    snprintf(dest, sizeof(dest), "%s/%s", snapshot_dir(name, type), filename);
-
-    bool is_root = strcmp(src, ROOT_SOURCE) == 0;
-    if (is_root) toggle_swap(false);
-
-    char cmd[CMD_BUF];
-    snprintf(cmd, sizeof(cmd), "btrfs subvolume snapshot %s %s", src, dest);
-    CmdResult r = run_cmd(cmd);
-
-    if (is_root) toggle_swap(true);
-
-    if (r.rc == 0) {
-        printf("Created (%s): %s\n", type, filename);
-        return true;
+    char snapname[STR_BUF];
+    snprintf(snapname, sizeof(snapname), "%s-%s-%s-%s", prefix, type, name, ts);
+    const char *base = strcmp(type, "auto") == 0 ? AUTO_DIR : MANUAL_DIR;
+    if (strcmp(name, "nsmd") == 0) base = DAEMON_AUTO_DIR;
+    char snapdir[PATH_BUF];
+    snprintf(snapdir, sizeof(snapdir), "%s/%s", base, snapname);
+    if (!ensure_dir(snapdir)) {
+        printf("Error: cannot create snapshot metadata directory.\n");
+        return false;
     }
-    printf("%s\n", r.out);
-    return false;
+    bool is_root = (strcmp(mountpoint, "/") == 0);
+    bool frozen = !is_root && freeze_mount(mountpoint);
+    CmdResult r;
+    if (info.is_thin) {
+        r = run_cmdf("lvcreate -s -n %s %s", snapname, info.lvpath);
+    } else {
+        r = run_cmdf("lvcreate -s -n %s -l 50%%ORIGIN %s", snapname, info.lvpath);
+    }
+    if (frozen) unfreeze_mount(mountpoint);
+    if (r.rc != 0) {
+        printf("%s\n", r.out);
+        remove_snapshot_meta(snapdir);
+        return false;
+    }
+    SnapshotMeta meta;
+    memset(&meta, 0, sizeof(meta));
+    snprintf(meta.kind, sizeof(meta.kind), "%s", prefix);
+    snprintf(meta.type, sizeof(meta.type), "%s", type);
+    snprintf(meta.name, sizeof(meta.name), "%s", snapname);
+    snprintf(meta.timestamp, sizeof(meta.timestamp), "%s", ts);
+    snprintf(meta.origin_mount, sizeof(meta.origin_mount), "%s", mountpoint);
+    snprintf(meta.origin_source, sizeof(meta.origin_source), "%s", source);
+    snprintf(meta.origin_vg, sizeof(meta.origin_vg), "%s", info.vg);
+    snprintf(meta.origin_lv, sizeof(meta.origin_lv), "%s", info.lv);
+    snprintf(meta.origin_lvpath, sizeof(meta.origin_lvpath), "%s", info.lvpath);
+    snprintf(meta.snapshot_lvpath, sizeof(meta.snapshot_lvpath), "/dev/%s/%s", info.vg, snapname);
+    if (!write_snapshot_meta(snapdir, &meta)) {
+        printf("Error: snapshot was created, but metadata could not be written.\n");
+        return false;
+    }
+    printf("Created (%s): %s\n", type, snapname);
+    return true;
 }
 
-static bool mount_btrfs_toplevel(const char *src, const char *mp)
+static bool delete_snapshot_lv(const char *snapshot_lvpath)
 {
-    if (!ensure_dir(mp)) return false;
-    char cmd[CMD_BUF];
-    snprintf(cmd, sizeof(cmd), "mount -t btrfs -o subvolid=5 %s %s", src, mp);
-    return run_cmd(cmd).rc == 0;
+    CmdResult r = run_cmdf("lvremove -fy %s", snapshot_lvpath);
+    return r.rc == 0;
 }
 
-static bool rollback_root(const char *snap_path)
+static int path_depth(const char *p)
 {
-    BtrfsMount bm;
-    if (!resolve_btrfs_mount(ROOT_SOURCE, &bm) || bm.subvol[0] == '\0') {
-        printf("Error: Cannot resolve btrfs mount for %s.\n", ROOT_SOURCE);
-        return false;
-    }
-    if (!mount_btrfs_toplevel(bm.source, BTRFS_TEMP_MOUNT)) {
-        printf("Error: Cannot mount top-level btrfs volume.\n");
-        return false;
-    }
-
-    char live[PATH_BUF], tmp[PATH_BUF + 16], cmd[CMD_BUF];
-    snprintf(live, sizeof(live), "%s/%s", BTRFS_TEMP_MOUNT, bm.subvol);
-    snprintf(tmp,  sizeof(tmp),  "%s_temp_del", live);
-
-    if (access(tmp, F_OK) == 0) {
-        snprintf(cmd, sizeof(cmd), "btrfs subvolume delete %s", tmp);
-        run_cmd(cmd);
-    }
-
-    snprintf(cmd, sizeof(cmd), "mv %s %s", live, tmp);
-    CmdResult mv = run_cmd(cmd);
-    if (mv.rc != 0) {
-        run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-        printf("Error: Cannot move current root subvolume: %s\n", mv.out);
-        return false;
-    }
-
-    snprintf(cmd, sizeof(cmd), "btrfs subvolume snapshot %s %s", snap_path, live);
-    CmdResult snap = run_cmd(cmd);
-
-    if (snap.rc == 0) {
-        snprintf(cmd, sizeof(cmd), "btrfs subvolume delete %s", tmp);
-        run_cmd(cmd);
-        run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-        printf("SUCCESS: Root rollback complete. REBOOT REQUIRED.\n");
-        return true;
-    }
-
-    snprintf(cmd, sizeof(cmd), "mv %s %s", tmp, live);
-    CmdResult restore = run_cmd(cmd);
-    run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-
-    if (restore.rc != 0)
-        printf("Rollback failed: %s\nFailed to restore original: %s\n", snap.out, restore.out);
-    else
-        printf("Rollback failed: %s\nOriginal root subvolume restored.\n", snap.out);
-
-    return false;
+    int d = 0;
+    for (const char *s = p; *s; s++) if (*s == '/') d++;
+    return d;
 }
 
-static bool rollback_home(const char *snap_path)
+static int cmp_path_desc(const void *a, const void *b)
 {
-    BtrfsMount bm;
-    if (!resolve_btrfs_mount(HOME_SOURCE, &bm) || bm.subvol[0] == '\0') {
-        printf("Error: Cannot resolve btrfs mount for %s.\n", HOME_SOURCE);
-        return false;
-    }
-    if (!mount_btrfs_toplevel(bm.source, BTRFS_TEMP_MOUNT)) {
-        printf("Error: Cannot mount top-level btrfs volume.\n");
-        return false;
-    }
-
-    char live[PATH_BUF], backup[PATH_BUF + 8], par[PATH_BUF], cmd[CMD_BUF];
-    snprintf(live,   sizeof(live),   "%s/%s", BTRFS_TEMP_MOUNT, bm.subvol);
-    snprintf(backup, sizeof(backup), "%s_old", live);
-    parent_path(live, par, sizeof(par));
-
-    if (!ensure_dir(par)) {
-        run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-        printf("Error: Cannot prepare subvolume path.\n");
-        return false;
-    }
-
-    if (access(backup, F_OK) == 0) {
-        snprintf(cmd, sizeof(cmd), "btrfs subvolume delete %s", backup);
-        run_cmd(cmd);
-    }
-
-    snprintf(cmd, sizeof(cmd), "mv %s %s", live, backup);
-    CmdResult mv = run_cmd(cmd);
-    if (mv.rc != 0) {
-        run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-        printf("Error: Cannot preserve current subvolume: %s\n", mv.out);
-        return false;
-    }
-
-    snprintf(cmd, sizeof(cmd), "btrfs subvolume snapshot %s %s", snap_path, live);
-    CmdResult snap = run_cmd(cmd);
-
-    if (snap.rc == 0) {
-        run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-        printf("SUCCESS: Home rollback complete. Old subvolume kept as %s_old. REBOOT REQUIRED.\n", bm.subvol);
-        return true;
-    }
-
-    snprintf(cmd, sizeof(cmd), "mv %s %s", backup, live);
-    CmdResult restore = run_cmd(cmd);
-    run_cmd("umount -l " BTRFS_TEMP_MOUNT);
-
-    if (restore.rc != 0)
-        printf("Rollback failed: %s\nFailed to restore original: %s\n", snap.out, restore.out);
-    else
-        printf("Rollback failed: %s\nOriginal subvolume restored.\n", snap.out);
-
-    return false;
+    const char *pa = *(const char *const *)a;
+    const char *pb = *(const char *const *)b;
+    int da = path_depth(pa);
+    int db = path_depth(pb);
+    if (da != db) return db - da;
+    size_t la = strlen(pa), lb = strlen(pb);
+    if (la != lb) return (lb > la) - (lb < la);
+    return strcmp(pa, pb);
 }
 
-static bool find_snapshot(const char *name, char *out, size_t sz)
+static bool rollback_home(const SnapshotMeta *meta)
+{
+    shell("fuser -km /home > /dev/null 2>&1");
+    sleep(1);
+    sync();
+    if (umount(HOME_SOURCE) != 0) {
+        shell("umount -l /home > /dev/null 2>&1");
+        sleep(1);
+    }
+    CmdResult ck = run_cmdf("fuser /home 2>/dev/null");
+    if (ck.rc == 0 && ck.out[0] != '\0') {
+        printf("Rollback failed: processes still hold /home open.\n");
+        shell("mount /home > /dev/null 2>&1");
+        return false;
+    }
+    sync();
+    run_cmdf("lvchange -an %s", meta->origin_lvpath);
+    CmdResult r = run_cmdf("lvconvert --merge %s", meta->snapshot_lvpath);
+    if (r.rc != 0) {
+        printf("Rollback failed: %s\n", r.out);
+        run_cmdf("lvchange -ay %s", meta->origin_lvpath);
+        shell("mount /home > /dev/null 2>&1");
+        return false;
+    }
+    run_cmdf("lvchange -ay %s", meta->origin_lvpath);
+    shell("mount /home > /dev/null 2>&1");
+    printf("SUCCESS: Home rollback complete. REBOOT may be required if the merge is pending.\n");
+    return true;
+}
+
+static bool initramfs_has_lvm_hook(void)
+{
+    CmdResult r = run_cmdf("lsinitramfs /boot/initrd.img-$(uname -r) 2>/dev/null | grep -q lvm");
+    return r.rc == 0;
+}
+
+static bool rollback_root(const SnapshotMeta *meta)
+{
+    if (!initramfs_has_lvm_hook()) {
+        printf("Warning: LVM hook not detected in initramfs.\n");
+        printf("The merge is scheduled but may not apply on reboot.\n");
+        printf("Run: update-initramfs -u   then reboot.\n");
+    }
+    CmdResult r = run_cmdf("lvconvert --merge %s", meta->snapshot_lvpath);
+    if (r.rc != 0) {
+        printf("Rollback failed: %s\n", r.out);
+        return false;
+    }
+    printf("SUCCESS: Root rollback scheduled. REBOOT REQUIRED.\n");
+    return true;
+}
+
+static bool find_snapshot(const char *name, char *dir_out, size_t sz)
 {
     const char *dirs[] = { MANUAL_DIR, AUTO_DIR, DAEMON_AUTO_DIR };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        snprintf(out, sz, "%s/%s", dirs[i], name);
-        if (access(out, F_OK) == 0) return true;
+        char path[PATH_BUF];
+        snprintf(path, sizeof(path), "%s/%s", dirs[i], name);
+        char meta[PATH_BUF];
+        snprintf(meta, sizeof(meta), "%s/%s", path, META_FILE);
+        if (access(meta, F_OK) == 0) {
+            snprintf(dir_out, sz, "%s", path);
+            return true;
+        }
     }
     return false;
 }
 
 static bool rollback_snapshot(const char *name)
 {
-    char path[PATH_BUF];
-    if (!find_snapshot(name, path, sizeof(path))) {
+    char dir[PATH_BUF];
+    if (!find_snapshot(name, dir, sizeof(dir))) {
         printf("Error: Snapshot '%s' not found.\n", name);
         return false;
     }
-    if (strncmp(name, "root-", 5) == 0) return rollback_root(path);
-    if (strncmp(name, "home-", 5) == 0) return rollback_home(path);
-    printf("Error: Snapshot name must start with 'root-' or 'home-'.\n");
+    SnapshotMeta meta;
+    if (!read_snapshot_meta(dir, &meta)) {
+        printf("Error: Snapshot metadata could not be read.\n");
+        return false;
+    }
+    if (strcmp(meta.kind, "root") == 0) return rollback_root(&meta);
+    if (strcmp(meta.kind, "home") == 0) return rollback_home(&meta);
+    printf("Error: invalid snapshot kind.\n");
     return false;
 }
 
@@ -378,32 +393,37 @@ static void list_dir(const char *dir)
 {
     DIR *d = opendir(dir);
     if (!d) return;
-
     char *roots[256], *homes[256];
     int nr = 0, nh = 0;
     struct dirent *e;
-
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        if      (strncmp(e->d_name, "root-", 5) == 0) roots[nr++] = strdup(e->d_name);
-        else if (strncmp(e->d_name, "home-", 5) == 0) homes[nh++] = strdup(e->d_name);
+        char meta[PATH_BUF];
+        snprintf(meta, sizeof(meta), "%s/%s/%s", dir, e->d_name, META_FILE);
+        if (access(meta, F_OK) != 0) continue;
+        if (strncmp(e->d_name, "root-", 5) == 0) {
+            if (nr < 256) roots[nr++] = strdup(e->d_name);
+        } else if (strncmp(e->d_name, "home-", 5) == 0) {
+            if (nh < 256) homes[nh++] = strdup(e->d_name);
+        }
     }
     closedir(d);
-
-    printf("  [Root]\n");
+    printf("  Snapshots:\n");
     if (!nr) printf("    (none)\n");
-    for (int i = 0; i < nr; i++) { printf("    %s\n", roots[i]); free(roots[i]); }
-
-    printf("  [Home]\n");
-    if (!nh) printf("    (none)\n");
-    for (int i = 0; i < nh; i++) { printf("    %s\n", homes[i]); free(homes[i]); }
+    for (int i = 0; i < nr; i++) {
+        printf("    %s\n", roots[i]);
+        free(roots[i]);
+    }
 }
 
 static void list_snapshots(void)
 {
-    printf("\nManual Snapshots\n");       list_dir(MANUAL_DIR);
-    printf("\napt Snapshots\n");          list_dir(AUTO_DIR);
-    printf("\nnsm Daemon Snapshots\n");list_dir(DAEMON_AUTO_DIR);
+    printf("\nManual Snapshots\n");
+    list_dir(MANUAL_DIR);
+    printf("\napt Snapshots\n");
+    list_dir(AUTO_DIR);
+    printf("\nnsm Daemon Snapshots\n");
+    list_dir(DAEMON_AUTO_DIR);
     printf("\n");
 }
 
@@ -414,43 +434,52 @@ static int cmp_str(const void *a, const void *b)
 
 static void delete_subvol(const char *path)
 {
-    char cmd[CMD_BUF];
-    snprintf(cmd, sizeof(cmd), "btrfs subvolume delete %s", path);
-    if (run_cmd(cmd).rc == 0) return;
-    if (rmdir(path) == 0) return;
-    unlink(path);
+    delete_snapshot_lv(path);
 }
 
 static void cleanup_dir(const char *dir)
 {
     DIR *d = opendir(dir);
     if (!d) return;
-
     char *roots[256], *homes[256];
     int nr = 0, nh = 0;
     struct dirent *e;
-
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        if      (strncmp(e->d_name, "root-", 5) == 0) roots[nr++] = strdup(e->d_name);
-        else if (strncmp(e->d_name, "home-", 5) == 0) homes[nh++] = strdup(e->d_name);
+        char meta[PATH_BUF];
+        snprintf(meta, sizeof(meta), "%s/%s/%s", dir, e->d_name, META_FILE);
+        if (access(meta, F_OK) != 0) continue;
+        if (strncmp(e->d_name, "root-", 5) == 0) {
+            if (nr < 256) roots[nr++] = strdup(e->d_name);
+        } else if (strncmp(e->d_name, "home-", 5) == 0) {
+            if (nh < 256) homes[nh++] = strdup(e->d_name);
+        }
     }
     closedir(d);
-
     qsort(roots, nr, sizeof(char *), cmp_str);
     qsort(homes, nh, sizeof(char *), cmp_str);
-
-    for (int i = 0; i < nr - 6; i++) {
-        char path[PATH_BUF];
-        snprintf(path, sizeof(path), "%s/%s", dir, roots[i]);
-        delete_subvol(path);
+    if (nr > 6) {
+        char path[PATH_BUF], meta[PATH_BUF];
+        snprintf(path, sizeof(path), "%s/%s", dir, roots[0]);
+        snprintf(meta, sizeof(meta), "%s/%s", path, META_FILE);
+        SnapshotMeta sm;
+        if (read_snapshot_meta(path, &sm)) {
+            delete_subvol(sm.snapshot_lvpath);
+        }
+        unlink(meta);
+        rmdir(path);
     }
-    for (int i = 0; i < nh - 6; i++) {
-        char path[PATH_BUF];
-        snprintf(path, sizeof(path), "%s/%s", dir, homes[i]);
-        delete_subvol(path);
+    if (nh > 6) {
+        char path[PATH_BUF], meta[PATH_BUF];
+        snprintf(path, sizeof(path), "%s/%s", dir, homes[0]);
+        snprintf(meta, sizeof(meta), "%s/%s", path, META_FILE);
+        SnapshotMeta sm;
+        if (read_snapshot_meta(path, &sm)) {
+            delete_subvol(sm.snapshot_lvpath);
+        }
+        unlink(meta);
+        rmdir(path);
     }
-
     for (int i = 0; i < nr; i++) free(roots[i]);
     for (int i = 0; i < nh; i++) free(homes[i]);
 }
@@ -466,11 +495,11 @@ static void print_usage(const char *prog)
 {
     printf("Usage: %s <command> [argument]\n\n", prog);
     printf("Commands:\n");
-    printf("  create <name>    Create root+home snapshots\n");
-    printf("                   Auto type if name matches 'apt', 'apt-*', or 'nftreedaemon'\n");
+    printf("  create <name>    Create snapshots on XFS/ext4/LVM volumes\n");
+    printf("                   Auto type if name matches 'apt', 'apt-*', or 'nsmd'\n");
     printf("  rollback <name>  Roll back to named snapshot (must start with root- or home-)\n");
     printf("  list             List all snapshots\n");
-    printf("  autodel          Delete oldest auto snapshots, keeping the latest 6\n");
+    printf("  autodel          Delete oldest snapshots, keeping the latest 6\n");
 }
 
 int main(int argc, char *argv[])
@@ -479,30 +508,40 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: root privileges required.\n");
         return 1;
     }
-    if (argc < 2) { print_usage(argv[0]); return 1; }
-
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
     const char *cmd = argv[1];
-
     if (strcmp(cmd, "create") == 0) {
-        if (argc < 3) { print_usage(argv[0]); return 1; }
-        setup_dirs();
-        bool isauto = is_auto_name(argv[2]);
+        if (argc < 3) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        ensure_dir("/nsm");
+        ensure_dir(SNAPSHOT_BASE);
+        ensure_dir(AUTO_DIR);
+        ensure_dir(DAEMON_AUTO_DIR);
+        ensure_dir(MANUAL_DIR);
+        bool isauto = false;
+        if (strcmp(argv[2], "nsmd") == 0) {
+            isauto = true;
+        } else if (strncmp(argv[2], "apt", 3) == 0) {
+            isauto = true;
+        }
         const char *type = isauto ? "auto" : "manual";
         create_snapshot(ROOT_SOURCE, "root", type, argv[2]);
-        create_snapshot(HOME_SOURCE, "home", type, argv[2]);
-        update_grub();
         if (isauto) autodel_snapshots();
-
     } else if (strcmp(cmd, "rollback") == 0) {
-        if (argc < 3) { print_usage(argv[0]); return 1; }
-        if (rollback_snapshot(argv[2])) update_grub();
-
+        if (argc < 3) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        rollback_snapshot(argv[2]);
     } else if (strcmp(cmd, "list") == 0) {
         list_snapshots();
-
     } else if (strcmp(cmd, "autodel") == 0) {
         autodel_snapshots();
-
     } else {
         fprintf(stderr, "Error: unknown command '%s'\n\n", cmd);
         print_usage(argv[0]);
