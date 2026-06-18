@@ -54,78 +54,79 @@ QLabel[alert-text="danger"] { color: #991b1b; font-weight: 600; }
 QTextEdit[log="true"] { background-color: #0f172a; color: #4ade80; font-family: 'Consolas', monospace; border-radius: 12px; border: none; padding: 15px; font-size: 13px; }
 QProgressBar { border: none; background-color: #e2e8f0; border-radius: 8px; height: 14px; text-align: center; font-size: 12px; color: #0f172a; }
 QProgressBar::chunk { background: qlineargradient(spread:pad, x1:0, y1:0.5, x2:1, y2:0.5, stop:0 #3b82f6, stop:1 #60a5fa); border-radius: 8px; }
-""" 
+"""
+
 TEXT = {
     "en": {
-        "title": "NextFerret Linux Installer", "step_welcome": "Welcome", "step_location": "Location", "step_keyboard": "Keyboard",
+        "title": "Arvor Linux Installer", "step_welcome": "Welcome", "step_location": "Location", "step_keyboard": "Keyboard",
         "step_desktop": "Software", "step_partitions": "Disk Setup", "step_users": "User Account", "step_summary": "Summary",
         "step_install": "Installing", "step_finish": "Complete", "next": "Next Step", "back": "Previous", "install": "Install System",
-        "quit": "Reboot System", "welcome_msg": "Welcome to NextFerret Linux", "welcome_sub": "Follow the steps to configure and install your new operating system.",
+        "quit": "Reboot System", "welcome_msg": "Welcome to Arvor Linux", "welcome_sub": "Follow the steps to configure and install your new operating system.",
         "locale": "System Language", "tz": "Timezone", "keymap": "Keyboard Layout", "de": "Desktop Environment", "disk": "Target Drive",
         "luks": "Enable Disk Encryption (LUKS)", "luks_p": "Encryption Password", "host": "Computer Name", "user_name": "Username (no spaces)",
         "pass": "Password", "pass_c": "Confirm Password", "err_pass": "Passwords do not match or are empty.", "err_disk": "Please select a target disk.",
         "err_user": "Username and Hostname are required.", "summary_title": "Installation Summary", "summary_warn": "Warning: All data on the selected drive will be permanently erased.",
-        "finish_msg": "Installation Complete", "finish_sub": "NextFerret Linux has been successfully installed. UEFI boot entry was automatically configured with efibootmgr. Remove the media and reboot.",
+        "finish_msg": "Installation Complete", "finish_sub": "Arvor Linux has been successfully installed. UEFI boot entry was automatically configured with efibootmgr. Remove the media and reboot.",
         "warn_vm": "Virtual Machine Detected", "warn_power": "Running on Battery", "net_err": "No Internet Connection detected. Installation requires an active connection."
     },
     "pt": {
-        "title": "Instalador NextFerret Linux", "step_welcome": "Bem-vindo", "step_location": "Localização", "step_keyboard": "Teclado",
+        "title": "Instalador Arvor Linux", "step_welcome": "Bem-vindo", "step_location": "Localização", "step_keyboard": "Teclado",
         "step_desktop": "Software", "step_partitions": "Disco", "step_users": "Usuário", "step_summary": "Resumo",
         "step_install": "Instalando", "step_finish": "Concluído", "next": "Próximo", "back": "Voltar", "install": "Instalar",
-        "quit": "Reiniciar", "welcome_msg": "Bem-vindo ao NextFerret Linux", "welcome_sub": "Siga os passos para configurar e instalar seu novo sistema.",
+        "quit": "Reiniciar", "welcome_msg": "Bem-vindo ao Arvor Linux", "welcome_sub": "Siga os passos para configurar e instalar seu novo sistema.",
         "locale": "Idioma", "tz": "Fuso Horário", "keymap": "Layout", "de": "Ambiente Gráfico", "disk": "Disco de Destino",
         "luks": "Criptografia de Disco (LUKS)", "luks_p": "Senha da Criptografia", "host": "Nome do Computador", "user_name": "Nome de usuário (sem espaços)",
         "pass": "Senha", "pass_c": "Confirmar Senha", "err_pass": "Senhas não conferem.", "err_disk": "Selecione um disco.",
         "err_user": "Nome de usuário e hostname são obrigatórios.", "summary_title": "Resumo da Instalação", "summary_warn": "Aviso: Todos os dados no disco selecionado serão apagados.",
-        "finish_msg": "Instalação Concluída", "finish_sub": "O NextFerret Linux foi instalado com sucesso. O boot UEFI foi configurado automaticamente com efibootmgr. Remova a mídia e reinicie.",
+        "finish_msg": "Instalação Concluída", "finish_sub": "O Arvor Linux foi instalado com sucesso. O boot UEFI foi configurado automaticamente com efibootmgr. Remova a mídia e reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Rodando na Bateria", "net_err": "Sem conexão com a Internet. A instalação requer rede ativa."
     },
     "es": {
-        "title": "Instalador NextFerret Linux", "step_welcome": "Bienvenido", "step_location": "Ubicación", "step_keyboard": "Teclado",
+        "title": "Instalador Arvor Linux", "step_welcome": "Bienvenido", "step_location": "Ubicación", "step_keyboard": "Teclado",
         "step_desktop": "Software", "step_partitions": "Disco", "step_users": "Usuario", "step_summary": "Resumen",
         "step_install": "Instalando", "step_finish": "Completado", "next": "Siguiente", "back": "Atrás", "install": "Instalar",
-        "quit": "Reiniciar", "welcome_msg": "Bienvenido a NextFerret Linux", "welcome_sub": "Siga los pasos para configurar e instalar su nuevo sistema.",
+        "quit": "Reiniciar", "welcome_msg": "Bienvenido a Arvor Linux", "welcome_sub": "Siga los pasos para configurar e instalar su nuevo sistema.",
         "locale": "Idioma", "tz": "Zona Horaria", "keymap": "Distribución de Teclado", "de": "Entorno de Escritorio", "disk": "Disco de Destino",
         "luks": "Cifrado de Disco (LUKS)", "luks_p": "Contraseña de Cifrado", "host": "Nombre del Equipo", "user_name": "Nombre de usuario (sin espacios)",
         "pass": "Contraseña", "pass_c": "Confirmar Contraseña", "err_pass": "Las contraseñas no coinciden.", "err_disk": "Seleccione un disco.",
         "err_user": "Nombre de usuario y hostname son obligatorios.", "summary_title": "Resumen de Instalación", "summary_warn": "Aviso: Todos los datos en el disco seleccionado serán eliminados.",
-        "finish_msg": "Instalación Completada", "finish_sub": "NextFerret Linux se instaló correctamente. La entrada de arranque UEFI se configuró automáticamente con efibootmgr. Retire el medio y reinicie.",
+        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux se instaló correctamente. La entrada de arranque UEFI se configuró automáticamente con efibootmgr. Retire el medio y reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Ejecutando con Batería", "net_err": "No se detectó conexión a Internet."
     },
     "fr": {
-        "title": "Programme d'installation NextFerret Linux", "step_welcome": "Bienvenue", "step_location": "Emplacement", "step_keyboard": "Clavier",
+        "title": "Programme d'installation Arvor Linux", "step_welcome": "Bienvenue", "step_location": "Emplacement", "step_keyboard": "Clavier",
         "step_desktop": "Logiciel", "step_partitions": "Disque", "step_users": "Utilisateur", "step_summary": "Résumé",
         "step_install": "Installation", "step_finish": "Terminé", "next": "Suivant", "back": "Retour", "install": "Installer",
-        "quit": "Redémarrer", "welcome_msg": "Bienvenue sur NextFerret Linux", "welcome_sub": "Suivez les étapes pour configurer et installer votre système.",
+        "quit": "Redémarrer", "welcome_msg": "Bienvenue sur Arvor Linux", "welcome_sub": "Suivez les étapes pour configurer et installer votre système.",
         "locale": "Langue", "tz": "Fuseau Horaire", "keymap": "Disposition du Clavier", "de": "Environnement de Bureau", "disk": "Disque Cible",
         "luks": "Chiffrement du Disque (LUKS)", "luks_p": "Mot de passe de Chiffrement", "host": "Nom de l'Ordinateur", "user_name": "Nom d'utilisateur (sans espaces)",
         "pass": "Mot de passe", "pass_c": "Confirmer le mot de passe", "err_pass": "Les mots de passe ne correspondent pas.", "err_disk": "Veuillez sélectionner un disque.",
         "err_user": "Nom d'utilisateur et hostname requis.", "summary_title": "Résumé de l'installation", "summary_warn": "Avertissement : Toutes les données sur le disque seront effacées.",
-        "finish_msg": "Installation Terminée", "finish_sub": "NextFerret Linux a été installé. L'entrée de démarrage UEFI a été configurée automatiquement avec efibootmgr. Retirez le support et redémarrez.",
+        "finish_msg": "Installation Terminée", "finish_sub": "Arvor Linux a été installé. L'entrée de démarrage UEFI a été configurée automatiquement avec efibootmgr. Retirez le support et redémarrez.",
         "warn_vm": "Machine Virtuelle Détectée", "warn_power": "Fonctionnement sur Batterie", "net_err": "Pas de connexion Internet."
     },
     "de": {
-        "title": "NextFerret Linux Installationsprogramm", "step_welcome": "Willkommen", "step_location": "Standort", "step_keyboard": "Tastatur",
+        "title": "Arvor Linux Installationsprogramm", "step_welcome": "Willkommen", "step_location": "Standort", "step_keyboard": "Tastatur",
         "step_desktop": "Software", "step_partitions": "Festplatte", "step_users": "Benutzer", "step_summary": "Zusammenfassung",
         "step_install": "Installieren", "step_finish": "Abgeschlossen", "next": "Weiter", "back": "Zurück", "install": "Installieren",
-        "quit": "Neustart", "welcome_msg": "Willkommen bei NextFerret Linux", "welcome_sub": "Folgen Sie den Schritten zur Konfiguration und Installation.",
+        "quit": "Neustart", "welcome_msg": "Willkommen bei Arvor Linux", "welcome_sub": "Folgen Sie den Schritten zur Konfiguration und Installation.",
         "locale": "Sprache", "tz": "Zeitzone", "keymap": "Tastaturlayout", "de": "Desktop-Umgebung", "disk": "Ziellaufwerk",
         "luks": "Festplattenverschlüsselung (LUKS)", "luks_p": "Verschlüsselungspasswort", "host": "Computername", "user_name": "Benutzername (keine Leerzeichen)",
         "pass": "Passwort", "pass_c": "Passwort bestätigen", "err_pass": "Passwörter stimmen nicht überein.", "err_disk": "Bitte wählen Sie eine Festplatte aus.",
         "err_user": "Benutzername und Hostname sind erforderlich.", "summary_title": "Zusammenfassung", "summary_warn": "Warnung: Alle Daten auf der ausgewählten Festplatte werden gelöscht.",
-        "finish_msg": "Installation Abgeschlossen", "finish_sub": "NextFerret Linux wurde erfolgreich installiert. Der UEFI-Boot-Eintrag wurde automatisch mit efibootmgr konfiguriert. Entfernen Sie das Medium und starten Sie neu.",
+        "finish_msg": "Installation Abgeschlossen", "finish_sub": "Arvor Linux wurde erfolgreich installiert. Der UEFI-Boot-Eintrag wurde automatisch mit efibootmgr konfiguriert. Entfernen Sie das Medium und starten Sie neu.",
         "warn_vm": "Virtuelle Maschine Erkannt", "warn_power": "Akkubetrieb Erkannt", "net_err": "Keine Internetverbindung erkannt."
     },
     "gl": {
-        "title": "Instalador NextFerret Linux", "step_welcome": "Benvido", "step_location": "Localización", "step_keyboard": "Teclado",
+        "title": "Instalador Arvor Linux", "step_welcome": "Benvido", "step_location": "Localización", "step_keyboard": "Teclado",
         "step_desktop": "Software", "step_partitions": "Configuración do Disco", "step_users": "Conta de Usuario", "step_summary": "Resumo",
         "step_install": "Instalando", "step_finish": "Completado", "next": "Seguinte", "back": "Atrás", "install": "Instalar",
-        "quit": "Reiniciar", "welcome_msg": "Benvido a NextFerret Linux", "welcome_sub": "Siga os pasos para configurar e instalar o seu novo sistema.",
+        "quit": "Reiniciar", "welcome_msg": "Benvido a Arvor Linux", "welcome_sub": "Siga os pasos para configurar e instalar o seu novo sistema.",
         "locale": "Idioma do Sistema", "tz": "Fuso Horario", "keymap": "Distribución do Teclado", "de": "Entorno de Escritorio", "disk": "Unidade de Destino",
         "luks": "Activar Cifrado de Disco (LUKS)", "luks_p": "Contrasinal de Cifrado", "host": "Nome do Computador", "user_name": "Nome de usuario (sen espazos)",
         "pass": "Contrasinal", "pass_c": "Confirmar Contrasinal", "err_pass": "Os contrasinais non coinciden.", "err_disk": "Seleccione unha unidade.",
         "err_user": "Nome de usuario e hostname son obrigatorios.", "summary_title": "Resumo da Instalación", "summary_warn": "Aviso: Todos os datos na unidade seleccionada serán eliminados.",
-        "finish_msg": "Instalación Completada", "finish_sub": "NextFerret Linux instalouse correctamente. O arranque UEFI configurouse automaticamente con efibootmgr. Retire o medio e reinicie.",
+        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux instalouse correctamente. O arranque UEFI configurouse automaticamente con efibootmgr. Retire o medio e reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Executando con Batería", "net_err": "Non se detectou conexión a Internet."
     }
 }
@@ -220,8 +221,8 @@ class InstallWorker(QThread):
         super().__init__()
         self.conf = conf
         self.sys_locale = locale
-        self.mount = "/mnt/nextferret"
-        self.mapper = "cryptferret"
+        self.mount = "/mnt/arvor"
+        self.mapper = "cryptarvor"
 
     def run_cmd(self, cmd, input_text=None):
         self.log_msg.emit(f"== {cmd}")
@@ -240,7 +241,7 @@ class InstallWorker(QThread):
             return False
 
     def simulate_install(self):
-        sim_logs = ["==> wipefs -a /dev/sda", "==> parted -s /dev/sda mklabel gpt", "==> mount /dev/sda2 /mnt/tmp_install", "Installation complete."]
+        sim_logs = ["==> wipefs -a /dev/sda", "==> parted -s /dev/sda mklabel gpt", "==> mount /dev/arvor_vg/root /mnt/tmp_install", "Installation complete."]
         delay = 10.0 / len(sim_logs)
         for i, msg in enumerate(sim_logs):
             self.log_msg.emit(msg)
@@ -257,59 +258,81 @@ class InstallWorker(QThread):
         self.progress.emit(0)
         d = self.conf["disk"]
         self.log_msg.emit("Starting disk partitioning...")
+        self.run_cmd("vgchange -an arvor_vg || true")
+        self.run_cmd(f"cryptsetup close {self.mapper} || true")
+        self.run_cmd(f"wipefs -a -f {d}")
 
-        self.run_cmd(f"wipefs -a {d}")
         self.run_cmd(f"parted -s {d} mklabel gpt")
         self.run_cmd(f"parted -s {d} mkpart ESP fat32 1MiB 513MiB")
         self.run_cmd(f"parted -s {d} set 1 esp on")
-        self.run_cmd(f"parted -s {d} mkpart primary 513MiB 100%")
+        self.run_cmd(f"parted -s {d} mkpart BOOT ext4 513MiB 1537MiB")
+        self.run_cmd(f"parted -s {d} mkpart LVM 1537MiB 100%")
+        
+        self.run_cmd(f"partprobe {d}")
+        self.run_cmd("udevadm settle")
+        time.sleep(2)
+        
         self.progress.emit(15)
 
         sep = "p" if "nvme" in d else ""
-        p1, p2 = f"{d}{sep}1", f"{d}{sep}2"
-        root_dev = p2
+        p1, p2, p3 = f"{d}{sep}1", f"{d}{sep}2", f"{d}{sep}3"
 
         if self.conf["luks"]:
-            self.run_cmd(f"cryptsetup luksFormat --type luks2 {p2} -", self.conf["luks_pass"])
-            self.run_cmd(f"cryptsetup open {p2} {self.mapper} -", self.conf["luks_pass"])
-            root_dev = f"/dev/mapper/{self.mapper}"
+            self.run_cmd(f"cryptsetup luksFormat --type luks2 {p3} -", self.conf["luks_pass"])
+            self.run_cmd(f"cryptsetup open {p3} {self.mapper} -", self.conf["luks_pass"])
+            lvm_dev = f"/dev/mapper/{self.mapper}"
+        else:
+            lvm_dev = p3
+
+        self.run_cmd(f"pvcreate -ff -y {lvm_dev}")
+        self.run_cmd(f"vgcreate arvor_vg {lvm_dev}")
+        pool_size = Sys.run("vgs --noheadings --units b -o vg_size arvor_vg 2>/dev/null | awk '{gsub(/B/,\"\"); print int($1 * 0.78)}'")
+        pool_vsize = f"{int(pool_size) // (1024*1024)}M" if pool_size and pool_size.isdigit() else "10G"
+        self.run_cmd(f"lvcreate -L {pool_vsize} -T arvor_vg/arvor_thin_pool")
+        self.run_cmd(f"lvcreate -V {pool_vsize} -T arvor_vg/arvor_thin_pool -n root")
+        self.run_cmd("lvchange -ay arvor_vg/root")
+        self.run_cmd("udevadm settle")
+
+        root_dev = "/dev/mapper/arvor_vg-root"
 
         self.run_cmd(f"mkfs.vfat -F32 {p1}")
-        self.run_cmd(f"mkfs.btrfs -f -L nflinux {root_dev}")
+        self.run_cmd(f"mkfs.ext4 -F {p2}")
+        self.run_cmd(f"mkfs.xfs -f {root_dev}")
+              
+        self.run_cmd("udevadm settle")
+        time.sleep(2)
         self.progress.emit(25)
 
         u_root = Sys.get_uuid(root_dev)
+        u_boot = Sys.get_uuid(p2)
         u_efi = Sys.get_uuid(p1)
-        if not u_root or not u_efi:
-            self.log_msg.emit("ERROR: Could not get UUIDs for partitions.")
-            self.finished.emit(False)
-            return
+        u_p3 = Sys.get_uuid(p3) if self.conf["luks"] else ""
+        f_root = f"UUID={u_root}" if u_root else root_dev
+        f_boot = f"UUID={u_boot}" if u_boot else p2
+        f_efi = f"UUID={u_efi}" if u_efi else p1
+        f_p3 = f"UUID={u_p3}" if u_p3 else p3
 
-        tmp = "/mnt/tmp_install"
-        os.makedirs(tmp, exist_ok=True)
-        self.run_cmd(f"mount {root_dev} {tmp}")
-        self.run_cmd(f"btrfs sub create {tmp}/@")
-        self.run_cmd(f"btrfs sub create {tmp}/@home")
-        self.run_cmd(f"umount {tmp}")
+        if "UUID=" not in f_root:
+            self.log_msg.emit("WARNING: UUID detection failed, using absolute paths in fstab.")
+
         self.progress.emit(30)
 
         os.makedirs(self.mount, exist_ok=True)
-        mnt_opts = "defaults,compress=zstd:1,noatime"
-        self.run_cmd(f"mount -o {mnt_opts},subvol=@ {root_dev} {self.mount}")
-        for p in ["home", "boot/efi"]: os.makedirs(f"{self.mount}/{p}", exist_ok=True)
-        self.run_cmd(f"mount -o {mnt_opts},subvol=@home {root_dev} {self.mount}/home")
+        self.run_cmd(f"mount {root_dev} {self.mount}")
+        os.makedirs(f"{self.mount}/boot", exist_ok=True)
+        self.run_cmd(f"mount {p2} {self.mount}/boot")
+        os.makedirs(f"{self.mount}/boot/efi", exist_ok=True)
         self.run_cmd(f"mount {p1} {self.mount}/boot/efi")
-        os.makedirs(f"{self.mount}/nf-tree/snapshots", exist_ok=True)
 
         if not self.run_cmd(f"debootstrap --arch=amd64 trixie {self.mount} http://deb.debian.org/debian"):
             self.finished.emit(False)
             return
         self.progress.emit(55)
 
-        self.run_cmd(f"wget -O {self.mount}/tmp/nextferret-base.deb https://github.com/NextFerret/nextferret-linux/releases/download/basenotiso4/nf-base_2.1_amd64.deb")
-
-        for m in ["/dev", "/dev/pts", "/proc", "/sys"]:
+        self.run_cmd(f"wget -O {self.mount}/tmp/nextferret-base.deb https://github.com/NextFerret/arvor/releases/download/basenotiso5/nf-base_3.0.0_amd64.deb")
+        for m in ["/dev", "/dev/pts", "/proc", "/sys", "/run"]:
             self.run_cmd(f"mount --bind {m} {self.mount}{m}")
+            
         shutil.copy("/etc/resolv.conf", f"{self.mount}/etc/resolv.conf")
 
         if os.path.exists("/etc/apt/preferences.d/nextferret"):
@@ -355,15 +378,14 @@ class InstallWorker(QThread):
                 if os.path.islink(osf): os.symlink(os.readlink(osf), dst)
                 else: shutil.copy2(osf, dst)
 
-        u_p2 = Sys.get_uuid(p2) if self.conf["luks"] else ""
-        luks_sh = f"echo '{self.mapper} UUID={u_p2} none luks,discard,initramfs' > /etc/crypttab\napt-get install -y cryptsetup-initramfs\n" if self.conf["luks"] and u_p2 else ""
+        luks_sh = f"echo '{self.mapper} {f_p3} none luks,discard,initramfs' > /etc/crypttab\napt-get install -y cryptsetup-initramfs\n" if self.conf["luks"] else ""
         de_sh = f"apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold {self.conf['de_pkgs']}\n" if self.conf["de_pkgs"] else ""
 
         fstab_sh = f"""
 cat << EOF > /etc/fstab
-UUID={u_root} /               btrfs   defaults,compress=zstd:1,noatime,subvol=@ 0      0
-UUID={u_root} /home           btrfs   defaults,compress=zstd:1,noatime,subvol=@home 0       0
-UUID={u_efi}  /boot/efi       vfat    defaults        0       1
+{f_root} /               xfs     defaults        0       0
+{f_boot} /boot           ext4    defaults        0       2
+{f_efi}  /boot/efi       vfat    defaults        0       1
 EOF
 """
 
@@ -406,7 +428,7 @@ fi
 dpkg-divert --add --package nextferret-core --rename --divert /usr/bin/old-apt /usr/bin/apt
 ln -sf /usr/bin/napt /usr/bin/apt
 
-apt-get install -y --no-install-recommends  debootstrap python3 linux-image-amd64 sudo network-manager firmware-linux grub-efi-amd64-signed shim-signed locales keyboard-configuration console-setup ca-certificates plymouth plymouth-themes btrfs-progs grub-common gawk inotify-tools git make efibootmgr curl xz-utils
+apt-get install -y --no-install-recommends debootstrap python3 linux-image-amd64 sudo network-manager firmware-linux grub-efi-amd64-signed shim-signed locales keyboard-configuration console-setup ca-certificates plymouth plymouth-themes lvm2 xfsprogs grub-common gawk inotify-tools git make efibootmgr curl xz-utils
 
 sed -i "s/^# *{self.sys_locale}/{self.sys_locale}/" /etc/locale.gen || true
 locale-gen || true
@@ -436,17 +458,41 @@ if [ -d "/usr/share/plymouth/themes/blockchain" ]; then
     plymouth-set-default-theme blockchain || true
 fi
 
-update-initramfs -c -k all || update-initramfs -u
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=nextferret-linux || true
-efibootmgr -c -d {self.conf["disk"]} -p 1 -L "NextFerret Linux" -l "\\EFI\\nextferret-linux\\grubx64.efi" || true
-update-grub || true
+mkdir -p /etc/initramfs-tools/conf.d
+echo "RESUME=none" > /etc/initramfs-tools/conf.d/resume
+echo "MODULES=most" > /etc/initramfs-tools/conf.d/modules
 
-mkdir -p /tmp/grub-btrfs
-git clone https://github.com/Antynea/grub-btrfs.git /tmp/grub-btrfs
-cd /tmp/grub-btrfs
-make install
-cd /
-rm -rf /tmp/grub-btrfs
+mkdir -p /etc/initramfs-tools/hooks
+cat << 'HOOK' > /etc/initramfs-tools/hooks/lvm2
+#!/bin/sh
+PREREQS=""
+prereqs() {{ echo "$PREREQS"; }}
+case "$1" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+copy_exec /sbin/lvm /sbin
+copy_exec /sbin/lvchange /sbin
+copy_exec /sbin/vgchange /sbin
+manual_add_modules dm-thin-pool dm_thin_pool dm-mod
+HOOK
+chmod +x /etc/initramfs-tools/hooks/lvm2
+
+mkdir -p /etc/initramfs-tools/scripts/local-top
+cat << 'SCRIPT' > /etc/initramfs-tools/scripts/local-top/activate_lvm
+#!/bin/sh
+PREREQS="lvm2"
+prereqs() {{ echo "$PREREQS"; }}
+case "$1" in prereqs) prereqs; exit 0;; esac
+vgchange -ay arvor_vg || true
+SCRIPT
+chmod +x /etc/initramfs-tools/scripts/local-top/activate_lvm
+
+sed -i 's|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX="rd.lvm.lv=arvor_vg/root"|' /etc/default/grub || true
+grep -q "rd.lvm.lv" /etc/default/grub || echo 'GRUB_CMDLINE_LINUX="rd.lvm.lv=arvor_vg/root"' >> /etc/default/grub
+
+update-initramfs -c -k all || update-initramfs -u
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=arvor-linux || true
+efibootmgr -c -d {self.conf["disk"]} -p 1 -L "Arvor Linux" -l "\\EFI\\arvor-linux\\grubx64.efi" || true
+update-grub || true
 
 if [ -x /usr/bin/nsm ]; then
     nsm create first-snapshot || true
@@ -462,10 +508,13 @@ exit 0
         self.run_cmd(f"chroot {self.mount} /s.sh")
         self.progress.emit(95)
 
-        for m in ["/dev/pts", "/dev", "/proc", "/sys"]: self.run_cmd(f"umount {self.mount}{m}")
+        for m in ["/run", "/sys", "/proc", "/dev/pts", "/dev"]: 
+            self.run_cmd(f"umount -l {self.mount}{m}")
+            
         try: self.run_cmd(f"umount -R {self.mount}")
         except: self.run_cmd(f"umount -l {self.mount}")
 
+        self.run_cmd("vgchange -an arvor_vg || true")
         if self.conf["luks"]: self.run_cmd(f"cryptsetup close {self.mapper}")
 
         self.progress.emit(100)
@@ -478,7 +527,7 @@ class InstallerGUI(QMainWindow):
         self.ui_lang = "en"
         self.sys_locale = "en_US.UTF-8"
         self.conf = {
-            "hostname": "nextferret", "disk": None, "user": "", "pass": "",
+            "hostname": "arvor", "disk": None, "user": "", "pass": "",
             "luks": False, "luks_pass": "", "keymap": "us", "timezone": "UTC",
             "de_name": "None", "de_pkgs": ""
         }
@@ -1046,7 +1095,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if not SIMULATE:
-        for t in ["debootstrap", "mkfs.btrfs", "parted", "cryptsetup", "wipefs", "mkfs.vfat", "wget", "btrfs", "efibootmgr"]:
+        for t in ["debootstrap", "mkfs.xfs", "mkfs.ext4", "pvcreate", "vgcreate", "lvcreate", "parted", "cryptsetup", "wipefs", "mkfs.vfat", "wget", "efibootmgr"]:
             if not shutil.which(t):
                 QMessageBox.critical(None, "Error", f"Missing tool: {t}")
                 sys.exit(1)
