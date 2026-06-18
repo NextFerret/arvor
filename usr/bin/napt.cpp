@@ -15,7 +15,6 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <set>
 #include <fcntl.h>
 #include <thread>
 #include <atomic>
@@ -37,7 +36,6 @@
 #include <apt-pkg/version.h>
 
 using namespace std;
-
 namespace fs = std::filesystem;
 
 const string TREE_ROOT = "/nsm/napt/root";
@@ -256,33 +254,7 @@ void umount_fs() {
     run_cmd("umount -l " + TREE_ROOT + "/sys >/dev/null 2>&1");
 }
 
-static string get_btrfs_root_subvol_path() {
-    FILE* pipe = popen("btrfs subvolume show / 2>/dev/null | grep 'Name:' | head -1 | awk '{print $2}'", "r");
-    if (!pipe) return "";
-    char buf[512];
-    string name;
-    if (fgets(buf, sizeof(buf), pipe)) {
-        name = buf;
-        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
-            name.pop_back();
-    }
-    pclose(pipe);
-
-    if (name.empty() || name == "/" || name == "<FS_TREE>") return "/";
-
-    pipe = popen("btrfs subvolume show / 2>/dev/null | grep 'Path:' | head -1 | sed 's/.*Path:[[:space:]]*//'", "r");
-    if (!pipe) return name;
-    string path;
-    if (fgets(buf, sizeof(buf), pipe)) {
-        path = buf;
-        while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
-            path.pop_back();
-    }
-    pclose(pipe);
-    return path.empty() ? name : path;
-}
-
-static string get_root_btrfs_device() {
+static string get_root_device() {
     FILE* pipe = popen("findmnt -n -o SOURCE / 2>/dev/null", "r");
     if (!pipe) return "";
     char buf[512];
@@ -298,47 +270,121 @@ static string get_root_btrfs_device() {
     return dev;
 }
 
-static const string BTRFS_TOP_MNT = "/nsm/napt/_btrfs_top";
-
-static bool mount_btrfs_toplevel(const string& device) {
-    run_cmd("mkdir -p " + shell_quote(BTRFS_TOP_MNT));
-    int rc = run_cmd("mount -o subvolid=5 " + shell_quote(device) + " " + shell_quote(BTRFS_TOP_MNT) + " 2>/dev/null");
-    return rc == 0;
+static string get_root_fstype() {
+    FILE* pipe = popen("findmnt -n -o FSTYPE / 2>/dev/null", "r");
+    if (!pipe) return "";
+    char buf[64];
+    string result;
+    if (fgets(buf, sizeof(buf), pipe)) result = buf;
+    pclose(pipe);
+    size_t s = result.find_first_not_of(" \n\r\t");
+    if (s == string::npos) return "";
+    size_t e = result.find_last_not_of(" \n\r\t");
+    return result.substr(s, e - s + 1);
 }
 
-static void umount_btrfs_toplevel() {
-    run_cmd("umount " + shell_quote(BTRFS_TOP_MNT) + " 2>/dev/null");
-    run_cmd("rmdir " + shell_quote(BTRFS_TOP_MNT) + " 2>/dev/null");
+static string get_vg_name(const string& lv_path) {
+    string cmd = "lvs --noheadings -o vg_name " + shell_quote(lv_path) + " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    char buf[256];
+    string vg;
+    if (fgets(buf, sizeof(buf), pipe)) {
+        vg = buf;
+    }
+    pclose(pipe);
+    size_t start = vg.find_first_not_of(" \n\r\t");
+    if (start == string::npos) return "";
+    size_t end = vg.find_last_not_of(" \n\r\t");
+    return vg.substr(start, end - start + 1);
+}
+
+static bool is_lv_thin(const string& lv_path) {
+    string cmd = "lvs --noheadings -o segtype " + shell_quote(lv_path) + " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return false;
+    char buf[128];
+    string result;
+    if (fgets(buf, sizeof(buf), pipe)) result = buf;
+    pclose(pipe);
+    size_t s = result.find_first_not_of(" \n\r\t");
+    if (s == string::npos) return false;
+    size_t e = result.find_last_not_of(" \n\r\t");
+    result = result.substr(s, e - s + 1);
+    return result.find("thin") != string::npos;
+}
+
+static double get_vg_free_gb(const string& vg_name) {
+    string cmd = "vgs --noheadings -o vg_free --units g " + shell_quote(vg_name) + " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return 0.0;
+    char buf[128];
+    string result;
+    if (fgets(buf, sizeof(buf), pipe)) result = buf;
+    pclose(pipe);
+    size_t s = result.find_first_not_of(" \n\r\t<>");
+    if (s == string::npos) return 0.0;
+    size_t e = result.find_first_of("gG", s);
+    if (e != string::npos) result = result.substr(s, e - s);
+    else result = result.substr(s);
+    try {
+        return stod(result);
+    } catch (...) {
+        return 0.0;
+    }
 }
 
 bool manage_sandbox(const string& action) {
+    string root_dev = get_root_device();
+    string vg_name = get_vg_name(root_dev);
+    string snap_lv_name = "napt_sandbox_snap";
+    string snap_dev = "/dev/" + vg_name + "/" + snap_lv_name;
+
     if (action == "create") {
         umount_fs();
-        run_cmd("btrfs subvolume delete -c " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1");
+        run_cmd("umount -l " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1");
+        run_cmd("lvremove -f " + shell_quote(snap_dev) + " >/dev/null 2>&1");
         run_cmd("mkdir -p /nsm/napt");
 
-        string device = get_root_btrfs_device();
-        if (device.empty()) {
-            cout << "Error: could not determine root btrfs device.\n";
+        if (root_dev.empty() || vg_name.empty()) {
+            cout << "Error: could not determine root LVM device or VG.\n";
             return false;
         }
 
-        if (!mount_btrfs_toplevel(device)) {
-            cout << "Error: could not mount btrfs top-level subvolume from " << device << ".\n";
-            return false;
+        bool thin = is_lv_thin(root_dev);
+        int rc;
+        if (thin) {
+            rc = run_cmd("lvcreate -s --name " + snap_lv_name + " -k n " + shell_quote(root_dev) + " >/dev/null 2>&1");
+        } else {
+            double free_gb = get_vg_free_gb(vg_name);
+            if (free_gb < 1.0) {
+                cout << "Error: not enough VG free space. Need 1GB, have " << free_gb << "GB.\n";
+                return false;
+            }
+            rc = run_cmd("lvcreate -L 1G -s --name " + snap_lv_name + " " + shell_quote(root_dev) + " >/dev/null 2>&1");
         }
-
-        string subvol_path = get_btrfs_root_subvol_path();
-        string src = BTRFS_TOP_MNT;
-        if (subvol_path != "/" && !subvol_path.empty()) {
-            src = BTRFS_TOP_MNT + "/" + subvol_path;
-        }
-
-        int rc = run_cmd("btrfs subvolume snapshot " + shell_quote(src) + " " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1");
-        umount_btrfs_toplevel();
 
         if (rc != 0) {
-            cout << "Error: btrfs snapshot of " << src << " -> " << TREE_ROOT << " failed (rc=" << rc << ").\n";
+            cout << "Error: LVM snapshot of " << root_dev << " failed (rc=" << rc << ").\n";
+            return false;
+        }
+
+        run_cmd("mkdir -p " + shell_quote(TREE_ROOT));
+
+        string fstype = get_root_fstype();
+        string mount_cmd;
+        if (fstype == "xfs") {
+            mount_cmd = "mount -t xfs -o nouuid " + shell_quote(snap_dev) + " " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1";
+        } else if (!fstype.empty()) {
+            mount_cmd = "mount -t " + fstype + " " + shell_quote(snap_dev) + " " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1";
+        } else {
+            mount_cmd = "mount " + shell_quote(snap_dev) + " " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1";
+        }
+
+        rc = run_cmd(mount_cmd);
+        if (rc != 0) {
+            cout << "Error: failed to mount snapshot to " << TREE_ROOT << " (rc=" << rc << ").\n";
+            run_cmd("lvremove -f " + shell_quote(snap_dev) + " >/dev/null 2>&1");
             return false;
         }
 
@@ -350,10 +396,10 @@ bool manage_sandbox(const string& action) {
 
         run_cmd("mkdir -p " + shell_quote(TREE_ROOT + "/tmp"));
         return true;
-
     } else if (action == "delete") {
         umount_fs();
-        run_cmd("btrfs subvolume delete -c " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1");
+        run_cmd("umount -l " + shell_quote(TREE_ROOT) + " >/dev/null 2>&1");
+        run_cmd("lvremove -f " + shell_quote(snap_dev) + " >/dev/null 2>&1");
         return true;
     }
     return false;
@@ -637,7 +683,7 @@ bool parse_napt_repo_metadata(const string& text, NaptRepoMetadata& metadata) {
 
             string pkg = trim_copy(trimmed.substr(0, pos));
             string rest = trim_copy(trimmed.substr(pos + 1));
-            
+
             string file_name;
             string hash;
 
@@ -937,7 +983,6 @@ bool get_deb_file_info(const string& path, DebFileInfo& info) {
     }
     int rc = pclose(pipe);
     if (rc == -1 || !(WIFEXITED(rc) && WEXITSTATUS(rc) == 0)) return false;
-
     istringstream ss(output);
     string line;
     while (getline(ss, line)) {
@@ -945,8 +990,8 @@ bool get_deb_file_info(const string& path, DebFileInfo& info) {
         if (colon == string::npos) continue;
         string key   = trim_copy(line.substr(0, colon));
         string value = trim_copy(line.substr(colon + 1));
-        if (key == "Package")      info.package_name = value;
-        else if (key == "Version") info.version      = value;
+        if (key == "Package")           info.package_name = value;
+        else if (key == "Version")      info.version      = value;
         else if (key == "Architecture") info.architecture = value;
     }
     return !info.package_name.empty();
@@ -976,7 +1021,6 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
 
             DebFileInfo deb_info;
             bool has_info = get_deb_file_info(pkg_name, deb_info);
-
             if (!quiet) {
                 cout << "Installing local .deb: ";
                 if (has_info) {
@@ -990,17 +1034,16 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
             }
 
             InstallDecision decision;
-            decision.package_name   = has_info ? deb_info.package_name : pkg_name;
-            decision.apt_argument   = pkg_name;
+            decision.package_name     = has_info ? deb_info.package_name : pkg_name;
+            decision.apt_argument     = pkg_name;
             decision.selected_version = has_info ? deb_info.version : "";
-            decision.from_napt      = false;
+            decision.from_napt        = false;
             decisions.push_back(decision);
             continue;
         }
 
         AptPackageState apt_state = get_apt_package_state(cache_file, pkg_name);
         NaptPackageCandidate napt_candidate = find_best_napt_candidate(repos, pkg_name);
-
         if (!apt_state.found && !napt_candidate.found) {
             if (!quiet) {
                 cout << "Package " << pkg_name << " not found.\n";
@@ -1052,10 +1095,10 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
             }
 
             InstallDecision decision;
-            decision.package_name = pkg_name;
-            decision.apt_argument = local_path;
+            decision.package_name     = pkg_name;
+            decision.apt_argument     = local_path;
             decision.selected_version = napt_candidate.version;
-            decision.from_napt = true;
+            decision.from_napt        = true;
             decisions.push_back(decision);
             if (!quiet) {
                 cout << "Using Napt package for " << pkg_name;
@@ -1083,10 +1126,10 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
         }
 
         InstallDecision decision;
-        decision.package_name = pkg_name;
-        decision.apt_argument = pkg_name;
+        decision.package_name     = pkg_name;
+        decision.apt_argument     = pkg_name;
         decision.selected_version = apt_state.candidate_version;
-        decision.from_napt = false;
+        decision.from_napt        = false;
         decisions.push_back(decision);
 
         if (!quiet) {
@@ -1112,20 +1155,17 @@ void do_nflinux_upgrade(bool apply_host) {
 
     string codenames = fetch_url("https://nextferret.github.io/version_codename");
     string repo_number_str = trim_copy(fetch_url("https://nextferret.github.io/repo-number"));
-    
     if (!codenames.empty() && !repo_number_str.empty()) {
         size_t comma = codenames.find(',');
         if (comma != string::npos) {
             string napt_code = trim_copy(codenames.substr(0, comma));
             string debian_code = trim_copy(codenames.substr(comma + 1));
-            
+
             string base_repo_url = "https://nextferretdur.github.io/repo-nflinux-" + repo_number_str;
             string meta_url = base_repo_url + "/releases/" + napt_code + "/repo-metadata";
-            
             if (!fetch_url(meta_url).empty()) {
                 run_cmd("rm -f /etc/napt/sources.list");
                 write_text_file("/etc/napt/sources.list", "deb " + base_repo_url + " " + napt_code + "\n");
-                
                 string apt_sources = "deb http://deb.debian.org/debian " + debian_code + " main contrib non-free non-free-firmware\n";
                 apt_sources += "deb http://deb.debian.org/debian-security " + debian_code + "-security main contrib non-free non-free-firmware\n";
                 apt_sources += "deb http://deb.debian.org/debian " + debian_code + "-updates main contrib non-free non-free-firmware\n";
@@ -1145,7 +1185,7 @@ void do_nflinux_upgrade(bool apply_host) {
     if (!pkgs_to_install.empty()) {
         sort(pkgs_to_install.begin(), pkgs_to_install.end());
         pkgs_to_install.erase(unique(pkgs_to_install.begin(), pkgs_to_install.end()), pkgs_to_install.end());
-        
+
         cout << "Installing required packages from repositories...\n";
         perform_install_transaction(pkgs_to_install, apply_host);
     }
@@ -1193,7 +1233,6 @@ static void render_chroot_bar(int filled, const string& time_str) {
 
 static string rewrite_cmd_stage_debs(const string& cmd, vector<string>& staged_host_paths) {
     string result;
-    bool has_debs = false;
     size_t i = 0;
     while (i < cmd.size()) {
         if (cmd[i] == '\'') {
@@ -1201,7 +1240,6 @@ static string rewrite_cmd_stage_debs(const string& cmd, vector<string>& staged_h
             if (end == string::npos) { result += cmd.substr(i); break; }
             string token = cmd.substr(i + 1, end - i - 1);
             if (token.size() > 4 && token.substr(token.size() - 4) == ".deb") {
-                has_debs = true;
                 string filename = token.substr(token.find_last_of('/') + 1);
                 string chroot_tmp_dir  = TREE_ROOT + "/tmp";
                 string chroot_tmp_host = chroot_tmp_dir + "/" + filename;
@@ -1258,7 +1296,6 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
             }
 
             dup2(open("/dev/null", O_WRONLY | O_CLOEXEC), STDOUT_FILENO);
-
             if (have_err_pipe) {
                 close(err_pipe[0]);
                 if (err_pipe[1] != STDERR_FILENO) {
@@ -1284,7 +1321,6 @@ void perform_transaction_cmd(const string& transaction_cmd, bool apply_host) {
             if (have_pipe) cmd += " -o APT::Status-Fd=3";
             bool res = do_command_transaction(cmd);
             exit(res ? 0 : 1);
-
         } else if (pid > 0) {
             if (have_pipe)     close(apt_pipe[1]);
             if (have_err_pipe) close(err_pipe[1]);
@@ -1510,7 +1546,6 @@ void perform_global_upgrade(bool apply_host) {
     };
 
     set<string> handled_pkgs;
-
     for (const auto& repo : repos) {
         if (repo.required_packages.empty()) continue;
 
@@ -1528,32 +1563,33 @@ void perform_global_upgrade(bool apply_host) {
             try_queue_napt_upgrade(already_installed_req, iv);
             handled_pkgs.insert(already_installed_req);
         } else {
-            bool installed_one = false;
             for (const auto& req : repo.required_packages) {
+                string iv = get_installed_version(req);
                 NaptPackageCandidate c = find_best_napt_candidate(repos, req);
+
+                if (!iv.empty()) {
+                    if (c.found && compare_versions(c.version, iv) > 0) {
+                        cout << "Upgrading required package: " << req << " (" << iv << " -> " << c.version << ")\n";
+                        try_queue_napt_upgrade(req, iv);
+                        handled_pkgs.insert(req);
+                    }
+                    continue;
+                }
+
                 if (c.found) {
                     cout << "Installing required package: " << req << "\n";
                     perform_install_transaction({req}, apply_host);
                     handled_pkgs.insert(req);
-                    installed_one = true;
-                    break;
+                } else {
+                    AptPackageState apt_state = get_apt_package_state(cache_file, req);
+                    if (apt_state.found) {
+                        cout << "Installing required package: " << req << "\n";
+                        perform_install_transaction({req}, apply_host);
+                        handled_pkgs.insert(req);
+                    } else {
+                        cout << "Warning: required package " << req << " not found in any repo, skipping.\n";
+                    }
                 }
-                AptPackageState apt_state = get_apt_package_state(cache_file, req);
-                if (apt_state.found) {
-                    cout << "Installing required package: " << req << "\n";
-                    perform_install_transaction({req}, apply_host);
-                    handled_pkgs.insert(req);
-                    installed_one = true;
-                    break;
-                }
-            }
-            if (!installed_one) {
-                cout << "Warning: could not install any required package (";
-                for (size_t i = 0; i < repo.required_packages.size(); ++i) {
-                    if (i) cout << ", ";
-                    cout << repo.required_packages[i];
-                }
-                cout << "). Falling back to apt upgrade.\n";
             }
         }
     }
@@ -1647,3 +1683,4 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+
