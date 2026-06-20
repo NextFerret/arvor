@@ -2,7 +2,7 @@
 
 # Arvor Linux : When Atomicity Meets Mutability.
 
-## We Are Switching to XFS and LVM in the version 4.1,the versions 3.1 and 4 are the LAST with BTRFS-Based Solutions,this was given because of rollbacking-ish issues,and XFS gives us more stability.
+## We Moved to XFS and LVM in the version 4.1.
 Arvor Linux is an Debian-Based Atomic&Mutable Solution.
 
 You may say "IT IS IMPOSSIBLE,IMMUTABLE = ATOMIC"
