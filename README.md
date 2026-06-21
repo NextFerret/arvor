@@ -3,6 +3,8 @@
 # Arvor Linux : When Atomicity Meets Mutability.
 
 ## We Moved to XFS and LVM in the version 4.1.
+
+## Arvor Linux 4.1 Will recive an ARM Version called Armvor.
 Arvor Linux is an Debian-Based Atomic&Mutable Solution.
 
 You may say "IT IS IMPOSSIBLE,IMMUTABLE = ATOMIC"
