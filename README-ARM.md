@@ -1,5 +1,3 @@
-<img width="3352" height="752" alt="The" src="https://github.com/user-attachments/assets/9edd72f1-a4c5-49da-ac38-6cd835661797" />
-
 # Armvor Linux : When Atomicity Meets Mutability.
 Armvor Linux is an Debian-Based Atomic&Mutable Solution.
 
