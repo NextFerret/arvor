@@ -67,3 +67,5 @@ anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
 32 GB of SD Card
 
 Rapsberry Pi 3/4/5 only.
+
+2 GB RAM
