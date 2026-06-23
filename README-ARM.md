@@ -1,3 +1,5 @@
+# READ BEFORE USING! ROOT DEFAULT PASSWORD IS 1
+
 # Armvor Linux : When Atomicity Meets Mutability.
 Armvor Linux is an Debian-Based Atomic&Mutable Solution.
 
