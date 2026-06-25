@@ -76,3 +76,5 @@ anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
 Any Modern CPU (15+ years)
 
 4 GB of RAM.
+
+# Software Cujo Código é Aberto (SCCA) by NextFerret by The Arvor License v1.
