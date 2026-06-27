@@ -8,10 +8,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define BASE_DIR "/nsm/chroots"
-#define VERSION "1.0.0"
+#define VERSION "2.0"
 
 typedef struct {
     int create;
@@ -34,14 +35,6 @@ static void fail(const char *fmt, ...) {
     fprintf(stderr, "\n");
     va_end(args);
     exit(1);
-}
-
-static int run_command(const char *cmd) {
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "Command failed: %s\n", cmd);
-    }
-    return rc;
 }
 
 static char *dup_string(const char *value) {
@@ -153,9 +146,14 @@ static void ensure_base_dirs(void) {
 }
 
 static void copy_file(const char *src, const char *dst) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", src, dst);
-    if (run_command(cmd) != 0) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("cp", "cp", src, dst, NULL);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fail("Failed to copy file");
     }
 }
@@ -163,7 +161,6 @@ static void copy_file(const char *src, const char *dst) {
 static void mount_chroot(const char *path) {
     const char *mounts[] = {"/proc", "/sys", "/dev", "/dev/pts", "/tmp", "/dev/dri"};
     char target[4096];
-    char cmd[8192];
     struct stat st;
     int i;
 
@@ -171,66 +168,125 @@ static void mount_chroot(const char *path) {
         if (stat(mounts[i], &st) == 0) {
             snprintf(target, sizeof(target), "%s%s", path, mounts[i]);
             mkdir_p(target);
-            snprintf(cmd, sizeof(cmd), "mountpoint -q '%s' || mount --bind '%s' '%s'", target, mounts[i], target);
-            run_command(cmd);
+            
+            pid_t pid = fork();
+            if (pid == 0) {
+                execlp("mountpoint", "mountpoint", "-q", target, NULL);
+                _exit(127);
+            }
+            int status;
+            waitpid(pid, &status, 0);
+            
+            if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                pid = fork();
+                if (pid == 0) {
+                    execlp("mount", "mount", "--bind", mounts[i], target, NULL);
+                    _exit(127);
+                }
+                waitpid(pid, NULL, 0);
+            }
         }
     }
 
     if (stat("/tmp/.X11-unix", &st) == 0) {
         snprintf(target, sizeof(target), "%s/tmp/.X11-unix", path);
         mkdir_p(target);
-        snprintf(cmd, sizeof(cmd), "mountpoint -q '%s' || mount --bind '/tmp/.X11-unix' '%s'", target, target);
-        run_command(cmd);
+        
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("mountpoint", "mountpoint", "-q", target, NULL);
+            _exit(127);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+        
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            pid = fork();
+            if (pid == 0) {
+                execlp("mount", "mount", "--bind", "/tmp/.X11-unix", target, NULL);
+                _exit(127);
+            }
+            waitpid(pid, NULL, 0);
+        }
     }
 
-    snprintf(cmd, sizeof(cmd), "chmod 1777 '%s/tmp' 2>/dev/null", path);
-    run_command(cmd);
+    char tmp_path[4096];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", path);
+    pid_t pid = fork();
+    if (pid == 0) {
+        FILE *devnull = fopen("/dev/null", "w");
+        if (devnull) {
+            dup2(fileno(devnull), STDERR_FILENO);
+            fclose(devnull);
+        }
+        execlp("chmod", "chmod", "1777", tmp_path, NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
 }
 
 static void umount_chroot(const char *path) {
     const char *mounts[] = {"/dev/dri", "/tmp/.X11-unix", "/tmp", "/dev/pts", "/dev", "/sys", "/proc"};
     char target[4096];
-    char cmd[8192];
     int i;
 
     for (i = 0; i < 7; i++) {
         snprintf(target, sizeof(target), "%s%s", path, mounts[i]);
-        snprintf(cmd, sizeof(cmd), "umount -l '%s' 2>/dev/null", target);
-        system(cmd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *devnull = fopen("/dev/null", "w");
+            if (devnull) {
+                dup2(fileno(devnull), STDERR_FILENO);
+                fclose(devnull);
+            }
+            execlp("umount", "umount", "-l", target, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
     }
 }
 
 static void download_archive(const char *source, const char *destination) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "curl -L --fail '%s' -o '%s'", source, destination);
-    if (run_command(cmd) != 0) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("curl", "curl", "-L", "--fail", source, "-o", destination, NULL);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fail("Failed to download archive");
     }
 }
 
 static void extract_archive(const char *archive, const char *target) {
-    char cmd[8192];
-
+    const char *flag = NULL;
     if (tar_supports(archive, ".tar.gz") || tar_supports(archive, ".tgz")) {
-        snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s'", archive, target);
+        flag = "-xzf";
     } else if (tar_supports(archive, ".tar.xz") || tar_supports(archive, ".txz")) {
-        snprintf(cmd, sizeof(cmd), "tar -xJf '%s' -C '%s'", archive, target);
+        flag = "-xJf";
     } else if (tar_supports(archive, ".tar.bz2") || tar_supports(archive, ".tbz2")) {
-        snprintf(cmd, sizeof(cmd), "tar -xjf '%s' -C '%s'", archive, target);
+        flag = "-xjf";
     } else if (tar_supports(archive, ".tar")) {
-        snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s'", archive, target);
+        flag = "-xf";
     } else {
         fail("Unsupported archive format: %s", archive);
     }
 
-    if (run_command(cmd) != 0) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("tar", "tar", flag, archive, "-C", target, NULL);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fail("Failed to extract archive");
     }
 }
 
 static void install_chroot_from_archive(const char *source, const char *target) {
     char archive[4096];
-    char cmd[8192];
 
     mkdir_p(target);
 
@@ -253,15 +309,19 @@ static void install_chroot_from_archive(const char *source, const char *target) 
         }
         download_archive(source, archive);
         extract_archive(archive, target);
-        snprintf(cmd, sizeof(cmd), "rm -f '%s'", archive);
-        system(cmd);
+        
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("rm", "rm", "-f", archive, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
     } else {
         extract_archive(source, target);
     }
 }
 
 static void bootstrap_chroot(const char *distro, const char *release, const char *target) {
-    char cmd[8192];
     const char *mirror;
 
     if (!release) {
@@ -274,8 +334,16 @@ static void bootstrap_chroot(const char *distro, const char *release, const char
     }
 
     mkdir_p(target);
-    snprintf(cmd, sizeof(cmd), "debootstrap --arch=%s --variant=minbase %s '%s' %s", sizeof(void *) == 8 ? "amd64" : "i386", release, target, mirror);
-    if (run_command(cmd) != 0) {
+    const char *arch = (sizeof(void *) == 8) ? "amd64" : "i386";
+    
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("debootstrap", "debootstrap", "--arch", arch, "--variant=minbase", release, target, mirror, NULL);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fail("Failed to create chroot with debootstrap");
     }
 }
@@ -288,19 +356,75 @@ static void prepare_network(const char *target) {
 }
 
 static void ensure_host_user_inside(const char *target) {
-    char cmd[8192];
     const char *user = host_user();
+    int status;
+    pid_t pid;
 
-    snprintf(cmd, sizeof(cmd), "chroot '%s' getent group '%s' >/dev/null 2>&1 || chroot '%s' groupadd '%s'", target, user, target, user);
-    system(cmd);
-    snprintf(cmd, sizeof(cmd), "chroot '%s' id -u '%s' >/dev/null 2>&1 || chroot '%s' useradd -m -g '%s' -s /bin/bash '%s'", target, user, target, user, user);
-    system(cmd);
-    snprintf(cmd, sizeof(cmd), "chroot '%s' usermod -aG sudo '%s' >/dev/null 2>&1", target, user);
-    system(cmd);
-    snprintf(cmd, sizeof(cmd), "chroot '%s' sh -c \"printf '%%s ALL=(ALL) NOPASSWD: ALL\\n' '%s' > /etc/sudoers.d/%s\"", target, user, user);
-    system(cmd);
-    snprintf(cmd, sizeof(cmd), "chroot '%s' chmod 0440 /etc/sudoers.d/%s >/dev/null 2>&1", target, user);
-    system(cmd);
+    pid = fork();
+    if (pid == 0) {
+        execlp("chroot", "chroot", target, "getent", "group", user, NULL);
+        _exit(127);
+    }
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        pid = fork();
+        if (pid == 0) {
+            execlp("chroot", "chroot", target, "groupadd", user, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
+    }
+
+    pid = fork();
+    if (pid == 0) {
+        execlp("chroot", "chroot", target, "id", "-u", user, NULL);
+        _exit(127);
+    }
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        pid = fork();
+        if (pid == 0) {
+            execlp("chroot", "chroot", target, "useradd", "-m", "-g", user, "-s", "/bin/bash", user, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
+    }
+
+    pid = fork();
+    if (pid == 0) {
+        FILE *devnull = fopen("/dev/null", "w");
+        if (devnull) {
+            dup2(fileno(devnull), STDOUT_FILENO);
+            dup2(fileno(devnull), STDERR_FILENO);
+            fclose(devnull);
+        }
+        execlp("chroot", "chroot", target, "usermod", "-aG", "sudo", user, NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
+
+    char sudoers_cmd[8192];
+    snprintf(sudoers_cmd, sizeof(sudoers_cmd), "printf '%%s ALL=(ALL) NOPASSWD: ALL\\n' '%s' > /etc/sudoers.d/%s", user, user);
+    pid = fork();
+    if (pid == 0) {
+        execlp("chroot", "chroot", target, "/bin/sh", "-c", sudoers_cmd, NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
+
+    char sud_file[256];
+    snprintf(sud_file, sizeof(sud_file), "/etc/sudoers.d/%s", user);
+    pid = fork();
+    if (pid == 0) {
+        FILE *devnull = fopen("/dev/null", "w");
+        if (devnull) {
+            dup2(fileno(devnull), STDERR_FILENO);
+            fclose(devnull);
+        }
+        execlp("chroot", "chroot", target, "chmod", "0440", sud_file, NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
 }
 
 static void lower_string(char *value) {
@@ -448,7 +572,6 @@ static void enter_chroot(const Options *options) {
     char target[4096];
     char xauth[4096];
     char chroot_xauth[4096];
-    char cmd[16384];
     char inner[12288];
     char runtime_target[4096];
     const char *user = host_user();
@@ -457,6 +580,8 @@ static void enter_chroot(const Options *options) {
     const char *wayland = getenv("WAYLAND_DISPLAY");
     const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
     int xauth_mounted = 0;
+    int status;
+    pid_t pid;
 
     if (!options->name) {
         fail("Missing chroot name");
@@ -473,22 +598,79 @@ static void enter_chroot(const Options *options) {
 
     mount_chroot(target);
 
-    snprintf(cmd, sizeof(cmd), "xhost +local:%s >/dev/null 2>&1", user);
-    system(cmd);
+    char local_user[256];
+    snprintf(local_user, sizeof(local_user), "+local:%s", user);
+    pid = fork();
+    if (pid == 0) {
+        FILE *devnull = fopen("/dev/null", "w");
+        if (devnull) {
+            dup2(fileno(devnull), STDOUT_FILENO);
+            dup2(fileno(devnull), STDERR_FILENO);
+            fclose(devnull);
+        }
+        execlp("xhost", "xhost", local_user, NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
 
     snprintf(xauth, sizeof(xauth), "%s/.Xauthority", home);
     if (path_exists(xauth)) {
         snprintf(chroot_xauth, sizeof(chroot_xauth), "%s/home/%s/.Xauthority", target, user);
-        snprintf(cmd, sizeof(cmd), "touch '%s' && mount --bind '%s' '%s'", chroot_xauth, xauth, chroot_xauth);
-        if (system(cmd) == 0) {
-            xauth_mounted = 1;
+        
+        pid = fork();
+        if (pid == 0) {
+            execlp("touch", "touch", chroot_xauth, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
+
+        pid = fork();
+        if (pid == 0) {
+            execlp("mountpoint", "mountpoint", "-q", chroot_xauth, NULL);
+            _exit(127);
+        }
+        waitpid(pid, &status, 0);
+
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            pid = fork();
+            if (pid == 0) {
+                execlp("mount", "mount", "--bind", xauth, chroot_xauth, NULL);
+                _exit(127);
+            }
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                xauth_mounted = 1;
+            }
         }
     }
 
     if (wayland && runtime_dir && wayland[0] && runtime_dir[0]) {
         snprintf(runtime_target, sizeof(runtime_target), "%s/tmp/%s", target, wayland);
-        snprintf(cmd, sizeof(cmd), "touch '%s' && mountpoint -q '%s' || mount --bind '%s/%s' '%s'", runtime_target, runtime_target, runtime_dir, wayland, runtime_target);
-        system(cmd);
+        
+        pid = fork();
+        if (pid == 0) {
+            execlp("touch", "touch", runtime_target, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
+
+        pid = fork();
+        if (pid == 0) {
+            execlp("mountpoint", "mountpoint", "-q", runtime_target, NULL);
+            _exit(127);
+        }
+        waitpid(pid, &status, 0);
+
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            char src_wayland[4096];
+            snprintf(src_wayland, sizeof(src_wayland), "%s/%s", runtime_dir, wayland);
+            pid = fork();
+            if (pid == 0) {
+                execlp("mount", "mount", "--bind", src_wayland, runtime_target, NULL);
+                _exit(127);
+            }
+            waitpid(pid, NULL, 0);
+        }
     }
 
     snprintf(inner, sizeof(inner), "export TERM=xterm; export DISPLAY='%s'; export XDG_RUNTIME_DIR=/tmp; export WAYLAND_DISPLAY='%s'; export QT_QPA_PLATFORM=wayland; export XAUTHORITY='/home/%s/.Xauthority'; %s",
@@ -498,16 +680,35 @@ static void enter_chroot(const Options *options) {
              options->exec_cmd ? options->exec_cmd : "/bin/bash");
 
     if (options->root) {
-        snprintf(cmd, sizeof(cmd), "chroot '%s' /bin/bash -lc \"%s\"", target, inner);
+        pid = fork();
+        if (pid == 0) {
+            execlp("chroot", "chroot", target, "/bin/bash", "-lc", inner, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
     } else {
-        snprintf(cmd, sizeof(cmd), "chroot '%s' /bin/su - '%s' -c \"%s\"", target, user, inner);
+        pid = fork();
+        if (pid == 0) {
+            execlp("chroot", "chroot", target, "/bin/su", "-", user, "-c", inner, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
     }
 
-    system(cmd);
-
     if (xauth_mounted) {
-        snprintf(cmd, sizeof(cmd), "umount -l '%s/home/%s/.Xauthority' 2>/dev/null", target, user);
-        system(cmd);
+        char xa_path[4096];
+        snprintf(xa_path, sizeof(xa_path), "%s/home/%s/.Xauthority", target, user);
+        pid = fork();
+        if (pid == 0) {
+            FILE *devnull = fopen("/dev/null", "w");
+            if (devnull) {
+                dup2(fileno(devnull), STDERR_FILENO);
+                fclose(devnull);
+            }
+            execlp("umount", "umount", "-l", xa_path, NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
     }
 
     umount_chroot(target);
@@ -515,7 +716,8 @@ static void enter_chroot(const Options *options) {
 
 static void delete_chroot(const Options *options) {
     char target[4096];
-    char cmd[8192];
+    int status;
+    pid_t pid;
 
     if (!options->name) {
         fail("Missing chroot name");
@@ -527,8 +729,13 @@ static void delete_chroot(const Options *options) {
     }
 
     umount_chroot(target);
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", target);
-    if (run_command(cmd) != 0) {
+    pid = fork();
+    if (pid == 0) {
+        execlp("rm", "rm", "-rf", target, NULL);
+        _exit(127);
+    }
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fail("Failed to delete chroot");
     }
 }
