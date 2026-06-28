@@ -78,3 +78,16 @@ Any Modern CPU (15+ years)
 4 GB of RAM.
 
 # Software Cujo Código é Aberto (SCCA) by NextFerret by The Arvor License v1.
+# FAQ:
+
+### Does This Distro Uses OverlayFS?
+No. In Fact we Actually Abomine using OverlayFS because of the historical LPEs Problem.
+
+### Does Arvor uses 100% python on their codebase?
+No. By the Release 2.1 We made Project Xesta,that turned the tools into C or C++
+
+### Does Arvor Uses ostree?
+No.
+
+### What is nf-tree that google said? i saw any nf-tree here!
+nf-tree was our snapshot manager based on BTRFS. We changed it to nsm in 2.1 because nf-tree had a patched-up structure and code.
