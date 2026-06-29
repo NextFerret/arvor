@@ -26,6 +26,8 @@ typedef struct {
     char *release;
     char *exec_cmd;
     char *url;
+    char *fs_type;
+    char *size;
 } Options;
 
 static void fail(const char *fmt, ...) {
@@ -168,7 +170,7 @@ static void mount_chroot(const char *path) {
         if (stat(mounts[i], &st) == 0) {
             snprintf(target, sizeof(target), "%s%s", path, mounts[i]);
             mkdir_p(target);
-            
+
             pid_t pid = fork();
             if (pid == 0) {
                 execlp("mountpoint", "mountpoint", "-q", target, NULL);
@@ -176,7 +178,7 @@ static void mount_chroot(const char *path) {
             }
             int status;
             waitpid(pid, &status, 0);
-            
+
             if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
                 pid = fork();
                 if (pid == 0) {
@@ -191,7 +193,7 @@ static void mount_chroot(const char *path) {
     if (stat("/tmp/.X11-unix", &st) == 0) {
         snprintf(target, sizeof(target), "%s/tmp/.X11-unix", path);
         mkdir_p(target);
-        
+
         pid_t pid = fork();
         if (pid == 0) {
             execlp("mountpoint", "mountpoint", "-q", target, NULL);
@@ -199,7 +201,7 @@ static void mount_chroot(const char *path) {
         }
         int status;
         waitpid(pid, &status, 0);
-        
+
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             pid = fork();
             if (pid == 0) {
@@ -309,7 +311,7 @@ static void install_chroot_from_archive(const char *source, const char *target) 
         }
         download_archive(source, archive);
         extract_archive(archive, target);
-        
+
         pid_t pid = fork();
         if (pid == 0) {
             execlp("rm", "rm", "-f", archive, NULL);
@@ -335,7 +337,7 @@ static void bootstrap_chroot(const char *distro, const char *release, const char
 
     mkdir_p(target);
     const char *arch = (sizeof(void *) == 8) ? "amd64" : "i386";
-    
+
     pid_t pid = fork();
     if (pid == 0) {
         execlp("debootstrap", "debootstrap", "--arch", arch, "--variant=minbase", release, target, mirror, NULL);
@@ -489,6 +491,14 @@ static void parse_args(int argc, char **argv, Options *options) {
             options->url = value_after_equals(argv[i]);
         } else if (strcmp(argv[i], "-u") == 0) {
             options->url = next_value(&i, argc, argv);
+        } else if (strncmp(argv[i], "-fs=", 4) == 0) {
+            options->fs_type = value_after_equals(argv[i]);
+        } else if (strcmp(argv[i], "-fs") == 0) {
+            options->fs_type = next_value(&i, argc, argv);
+        } else if (strncmp(argv[i], "-s=", 3) == 0) {
+            options->size = value_after_equals(argv[i]);
+        } else if (strcmp(argv[i], "-s") == 0) {
+            options->size = next_value(&i, argc, argv);
         } else {
             fail("Unknown argument: %s", argv[i]);
         }
@@ -500,13 +510,39 @@ static void parse_args(int argc, char **argv, Options *options) {
 }
 
 static void usage(const char *argv0) {
-    printf("Usage:\n");
-    printf("  %s -c -n=<name> -d <distro> -r <release>\n", argv0);
-    printf("  %s -c -n=<name> -u <archive-or-url>\n", argv0);
-    printf("  %s -e -n=<name> [-r] [-exec=\"command\"]\n", argv0);
-    printf("  %s -del -n=<name>\n", argv0);
-    printf("  %s -l\n", argv0);
-    printf("  %s -v\n", argv0);
+    printf("\n  nlc %s — chroot lifecycle manager\n\n", VERSION);
+
+    printf("  Creates, enters, and removes named chroot environments\n");
+    printf("  stored under %s.\n\n", BASE_DIR);
+
+    printf("  Usage:\n\n");
+
+    printf("    %s -c -n <name> -d <distro> -r <release>\n", argv0);
+    printf("        Bootstrap a minimal chroot via debootstrap.\n");
+    printf("        Supported distros: debian, ubuntu, kali, devuan, parrot\n\n");
+
+    printf("    %s -c -n <name> -d <distro> -r <release> -fs <fstype> -s <size>\n", argv0);
+    printf("        Same as above, but creates a sparse image file of the given\n");
+    printf("        size, formats it with <fstype> (e.g. ext4, xfs), mounts it,\n");
+    printf("        and installs the bootstrap into it.\n\n");
+
+    printf("    %s -c -n <name> -u <archive-or-url>\n", argv0);
+    printf("        Install a chroot from a local tar archive or remote URL.\n");
+    printf("        Supported formats: .tar.gz  .tgz  .tar.xz  .txz  .tar.bz2  .tar\n\n");
+
+    printf("    %s -e -n <name> [-r] [-exec <command>]\n", argv0);
+    printf("        Enter a chroot as the current user (or root with -r).\n");
+    printf("        Bind-mounts /proc /sys /dev /tmp and X11/Wayland sockets.\n");
+    printf("        Optionally runs <command> instead of an interactive shell.\n\n");
+
+    printf("    %s -del -n <name>\n", argv0);
+    printf("        Unmount and permanently delete a chroot.\n\n");
+
+    printf("    %s -l\n", argv0);
+    printf("        List all existing chroots.\n\n");
+
+    printf("    %s -v\n", argv0);
+    printf("        Print version and exit.\n\n");
 }
 
 static void list_chroots(void) {
@@ -536,6 +572,102 @@ static void list_chroots(void) {
     closedir(dir);
 }
 
+static void run_cmd(const char *prog, ...) {
+    va_list ap;
+    const char *args[64];
+    int n = 0;
+    args[n++] = prog;
+    va_start(ap, prog);
+    const char *a;
+    while ((a = va_arg(ap, const char *)) != NULL) {
+        args[n++] = a;
+    }
+    va_end(ap);
+    args[n] = NULL;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execvp(prog, (char * const *)args);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        fail("Command failed: %s", prog);
+    }
+}
+
+static void create_sparse_chroot(const Options *options, const char *target) {
+    char img_path[4096];
+    char loop_dev[256];
+    char mkfs_cmd[64];
+    FILE *fp;
+
+    snprintf(img_path, sizeof(img_path), "%s.img", target);
+
+    if (path_exists(img_path)) {
+        fail("Image already exists: %s", img_path);
+    }
+
+    run_cmd("truncate", "-s", options->size, img_path, NULL);
+
+    if (strcmp(options->fs_type, "xfs") == 0) {
+        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.xfs");
+    } else if (strcmp(options->fs_type, "ext4") == 0) {
+        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext4");
+    } else if (strcmp(options->fs_type, "ext3") == 0) {
+        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext3");
+    } else if (strcmp(options->fs_type, "ext2") == 0) {
+        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext2");
+    } else if (strcmp(options->fs_type, "btrfs") == 0) {
+        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.btrfs");
+    } else {
+        fail("Unsupported filesystem type: %s (supported: ext2, ext3, ext4, xfs, btrfs)", options->fs_type);
+    }
+
+    run_cmd(mkfs_cmd, "-F", img_path, NULL);
+
+    {
+        char cmd[8192];
+        snprintf(cmd, sizeof(cmd), "losetup -f --show %s", img_path);
+        fp = popen(cmd, "r");
+    }
+    if (!fp) {
+        fail("Failed to set up loop device for %s", img_path);
+    }
+    if (!fgets(loop_dev, sizeof(loop_dev), fp)) {
+        pclose(fp);
+        fail("Failed to read loop device name");
+    }
+    pclose(fp);
+
+    size_t len = strlen(loop_dev);
+    while (len > 0 && (loop_dev[len - 1] == '\n' || loop_dev[len - 1] == '\r')) {
+        loop_dev[--len] = '\0';
+    }
+
+    if (len == 0) {
+        fail("losetup returned empty device name");
+    }
+
+    mkdir_p(target);
+    run_cmd("mount", loop_dev, target, NULL);
+
+    if (options->url) {
+        install_chroot_from_archive(options->url, target);
+    } else if (archive_source(options->distro)) {
+        install_chroot_from_archive(options->distro, target);
+    } else {
+        bootstrap_chroot(options->distro, options->release, target);
+    }
+
+    run_cmd("umount", target, NULL);
+    run_cmd("losetup", "-d", loop_dev, NULL);
+
+    printf("Sparse image created at %s (%s, %s)\n", img_path, options->fs_type, options->size);
+    printf("Mount with:  mount -o loop %s %s\n", img_path, target);
+}
+
 static void create_chroot(const Options *options) {
     char target[4096];
 
@@ -543,15 +675,26 @@ static void create_chroot(const Options *options) {
         fail("Missing chroot name");
     }
     if (!options->distro && !options->url) {
-        fail("Use -d <distro> with -r <release> or -u <archive-or-url>");
+        fail("Use -d <distro> with -r <release>, or -u <archive-or-url>");
     }
     if (options->distro && options->url) {
         fail("Use only one source: distro or archive/url");
+    }
+    if (options->fs_type && !options->size) {
+        fail("Filesystem type (-fs) requires a size (-s <size>, e.g. 10G)");
+    }
+    if (options->size && !options->fs_type) {
+        fail("Size (-s) requires a filesystem type (-fs <fstype>, e.g. ext4, xfs)");
     }
 
     snprintf(target, sizeof(target), "%s/%s", BASE_DIR, options->name);
     if (path_exists(target)) {
         fail("Chroot already exists: %s", options->name);
+    }
+
+    if (options->fs_type) {
+        create_sparse_chroot(options, target);
+        return;
     }
 
     if (options->url) {
@@ -616,7 +759,7 @@ static void enter_chroot(const Options *options) {
     snprintf(xauth, sizeof(xauth), "%s/.Xauthority", home);
     if (path_exists(xauth)) {
         snprintf(chroot_xauth, sizeof(chroot_xauth), "%s/home/%s/.Xauthority", target, user);
-        
+
         pid = fork();
         if (pid == 0) {
             execlp("touch", "touch", chroot_xauth, NULL);
@@ -646,7 +789,7 @@ static void enter_chroot(const Options *options) {
 
     if (wayland && runtime_dir && wayland[0] && runtime_dir[0]) {
         snprintf(runtime_target, sizeof(runtime_target), "%s/tmp/%s", target, wayland);
-        
+
         pid = fork();
         if (pid == 0) {
             execlp("touch", "touch", runtime_target, NULL);
@@ -673,7 +816,10 @@ static void enter_chroot(const Options *options) {
         }
     }
 
-    snprintf(inner, sizeof(inner), "export TERM=xterm; export DISPLAY='%s'; export XDG_RUNTIME_DIR=/tmp; export WAYLAND_DISPLAY='%s'; export QT_QPA_PLATFORM=wayland; export XAUTHORITY='/home/%s/.Xauthority'; %s",
+    snprintf(inner, sizeof(inner),
+             "export TERM=xterm; export DISPLAY='%s'; export XDG_RUNTIME_DIR=/tmp; "
+             "export WAYLAND_DISPLAY='%s'; export QT_QPA_PLATFORM=wayland; "
+             "export XAUTHORITY='/home/%s/.Xauthority'; %s",
              display,
              wayland ? wayland : "",
              user,
