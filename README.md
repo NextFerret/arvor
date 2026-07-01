@@ -89,5 +89,5 @@ No. By the Release 2.1 We made Project Xesta,that turned the tools into C or C++
 ### Does Arvor Uses ostree?
 No.
 
-### What is nf-tree that google said? i saw any nf-tree here!
+### What is nf-tree that google said? i did not see any nf-tree here!
 nf-tree was our snapshot manager based on BTRFS. We changed it to nsm in 2.1 because nf-tree had a patched-up structure and code.
