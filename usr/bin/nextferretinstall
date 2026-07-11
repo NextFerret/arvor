@@ -25,35 +25,42 @@ FILES = [
     "/usr/bin/apt-nf-tree",
     "/etc/napt/sources.list",
     "/usr/bin/nlc",
-    "/usr/bin/nsmd_start"
+    "/usr/bin/lvmabd_start"
 ]
 
 STYLES = """
-QMainWindow { background-color: #f8fafc; }
-QWidget { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; }
-QListWidget { background-color: #0f172a; border: none; outline: none; padding-top: 35px; }
-QListWidget::item { color: #94a3b8; padding: 18px 24px; border-left: 4px solid transparent; font-weight: 600; font-size: 15px; }
-QListWidget::item:selected { background-color: #1e293b; color: #ffffff; border-left: 4px solid #3b82f6; }
-QListWidget::item:hover:!selected { background-color: #1e293b; color: #e2e8f0; }
-QLabel { color: #1e293b; }
-QLabel[heading="true"] { font-size: 36px; font-weight: 800; color: #0f172a; letter-spacing: -0.5px; margin-bottom: 4px; }
-QLabel[subheading="true"] { font-size: 16px; color: #64748b; margin-bottom: 30px; font-weight: 400; }
-QPushButton { background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 28px; color: #475569; font-weight: 600; font-size: 15px; }
-QPushButton:hover { background-color: #f1f5f9; border-color: #cbd5e1; color: #0f172a; }
-QPushButton:disabled { background-color: #f8fafc; color: #cbd5e1; border-color: #e2e8f0; }
-QPushButton[primary="true"] { background-color: #3b82f6; border: none; color: white; }
-QPushButton[primary="true"]:hover { background-color: #2563eb; }
-QLineEdit, QComboBox { padding: 14px; border: 1.5px solid #e2e8f0; border-radius: 12px; background-color: white; font-size: 15px; color: #1e293b; selection-background-color: #3b82f6; }
-QLineEdit:focus, QComboBox:focus { border: 1.5px solid #3b82f6; outline: none; background-color: #f8fafc; }
-QComboBox::drop-down { border: none; padding-right: 15px; }
-QFrame[card="true"] { background-color: white; border-radius: 20px; border: 1px solid #e2e8f0; }
-QFrame[alert="warning"] { background-color: #fef3c7; border: 1px solid #fde68a; border-radius: 12px; }
-QLabel[alert-text="warning"] { color: #92400e; font-weight: 600; }
-QFrame[alert="danger"] { background-color: #fee2e2; border: 1px solid #fecaca; border-radius: 12px; }
-QLabel[alert-text="danger"] { color: #991b1b; font-weight: 600; }
-QTextEdit[log="true"] { background-color: #0f172a; color: #4ade80; font-family: 'Consolas', monospace; border-radius: 12px; border: none; padding: 15px; font-size: 13px; }
-QProgressBar { border: none; background-color: #e2e8f0; border-radius: 8px; height: 14px; text-align: center; font-size: 12px; color: #0f172a; }
-QProgressBar::chunk { background: qlineargradient(spread:pad, x1:0, y1:0.5, x2:1, y2:0.5, stop:0 #3b82f6, stop:1 #60a5fa); border-radius: 8px; }
+QMainWindow{background:#f5f7fb;}
+QWidget{font:14px "Segoe UI",sans-serif;color:#243042;}
+
+QListWidget{background:#162033;border:none;padding:28px 0;}
+QListWidget::item{padding:15px 22px;color:#8e9db4;border-left:3px solid transparent;}
+QListWidget::item:hover{background:#202c42;color:#eef4ff;}
+QListWidget::item:selected{background:#27344d;color:#fff;border-left:3px solid #4a78ff;}
+
+QLabel{color:#243042;}
+QLabel[heading="true"]{font-size:33px;font-weight:600;color:#172033;}
+QLabel[subheading="true"]{font-size:16px;color:#66758d;}
+
+QPushButton{background:#fff;border:1px solid #d9e1eb;border-radius:12px;padding:11px 24px;color:#314056;}
+QPushButton:hover{background:#f8faff;border-color:#4a78ff;}
+QPushButton[primary="true"]{background:#4a78ff;color:#fff;border:none;}
+QPushButton[primary="true"]:hover{background:#3868ef;}
+
+QLineEdit,QComboBox{background:#fff;border:1px solid #d9e1eb;border-radius:12px;padding:12px;color:#243042;selection-background-color:#4a78ff;}
+QLineEdit:focus,QComboBox:focus{border:1px solid #4a78ff;background:#fbfcff;}
+QComboBox::drop-down{border:none;width:24px;}
+
+QFrame[card="true"]{background:#fff;border:1px solid #e5ebf3;border-radius:18px;}
+
+QFrame[alert="warning"]{background:#fff8ea;border:1px solid #f1d184;border-radius:10px;}
+QLabel[alert-text="warning"]{color:#8c5a0b;}
+QFrame[alert="danger"]{background:#fff1f1;border:1px solid #f3b7b7;border-radius:10px;}
+QLabel[alert-text="danger"]{color:#b02b2b;}
+
+QTextEdit[log="true"]{background:#131d2d;color:#68d391;border:none;border-radius:12px;padding:14px;font:13px Consolas;}
+
+QProgressBar{background:#e4eaf2;border:none;border-radius:6px;height:12px;}
+QProgressBar::chunk{border-radius:6px;background:#4a78ff;}
 """
 
 TEXT = {
@@ -66,7 +73,7 @@ TEXT = {
         "luks": "Enable Disk Encryption (LUKS)", "luks_p": "Encryption Password", "host": "Computer Name", "user_name": "Username (no spaces)",
         "pass": "Password", "pass_c": "Confirm Password", "err_pass": "Passwords do not match or are empty.", "err_disk": "Please select a target disk.",
         "err_user": "Username and Hostname are required.", "summary_title": "Installation Summary", "summary_warn": "Warning: All data on the selected drive will be permanently erased.",
-        "finish_msg": "Installation Complete", "finish_sub": "Arvor Linux has been successfully installed. UEFI boot entry was automatically configured with efibootmgr. Remove the media and reboot.",
+        "finish_msg": "Installation Complete", "finish_sub": "Arvor Linux has been successfully installed. Remove the media and reboot.",
         "warn_vm": "Virtual Machine Detected", "warn_power": "Running on Battery", "net_err": "No Internet Connection detected. Installation requires an active connection."
     },
     "pt": {
@@ -78,7 +85,7 @@ TEXT = {
         "luks": "Criptografia de Disco (LUKS)", "luks_p": "Senha da Criptografia", "host": "Nome do Computador", "user_name": "Nome de usuário (sem espaços)",
         "pass": "Senha", "pass_c": "Confirmar Senha", "err_pass": "Senhas não conferem.", "err_disk": "Selecione um disco.",
         "err_user": "Nome de usuário e hostname são obrigatórios.", "summary_title": "Resumo da Instalação", "summary_warn": "Aviso: Todos os dados no disco selecionado serão apagados.",
-        "finish_msg": "Instalação Concluída", "finish_sub": "O Arvor Linux foi instalado com sucesso. O boot UEFI foi configurado automaticamente com efibootmgr. Remova a mídia e reinicie.",
+        "finish_msg": "Instalação Concluída", "finish_sub": "O Arvor Linux foi instalado com sucesso. Remova a mídia e reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Rodando na Bateria", "net_err": "Sem conexão com a Internet. A instalação requer rede ativa."
     },
     "es": {
@@ -90,7 +97,7 @@ TEXT = {
         "luks": "Cifrado de Disco (LUKS)", "luks_p": "Contraseña de Cifrado", "host": "Nombre del Equipo", "user_name": "Nombre de usuario (sin espacios)",
         "pass": "Contraseña", "pass_c": "Confirmar Contraseña", "err_pass": "Las contraseñas no coinciden.", "err_disk": "Seleccione un disco.",
         "err_user": "Nombre de usuario y hostname son obligatorios.", "summary_title": "Resumen de Instalación", "summary_warn": "Aviso: Todos los datos en el disco seleccionado serán eliminados.",
-        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux se instaló correctamente. La entrada de arranque UEFI se configuró automáticamente con efibootmgr. Retire el medio y reinicie.",
+        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux se instaló correctamente. Retire el medio y reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Ejecutando con Batería", "net_err": "No se detectó conexión a Internet."
     },
     "fr": {
@@ -102,7 +109,7 @@ TEXT = {
         "luks": "Chiffrement du Disque (LUKS)", "luks_p": "Mot de passe de Chiffrement", "host": "Nom de l'Ordinateur", "user_name": "Nom d'utilisateur (sans espaces)",
         "pass": "Mot de passe", "pass_c": "Confirmer le mot de passe", "err_pass": "Les mots de passe ne correspondent pas.", "err_disk": "Veuillez sélectionner un disque.",
         "err_user": "Nom d'utilisateur et hostname requis.", "summary_title": "Résumé de l'installation", "summary_warn": "Avertissement : Toutes les données sur le disque seront effacées.",
-        "finish_msg": "Installation Terminée", "finish_sub": "Arvor Linux a été installé. L'entrée de démarrage UEFI a été configurée automatiquement avec efibootmgr. Retirez le support et redémarrez.",
+        "finish_msg": "Installation Terminée", "finish_sub": "Arvor Linux a été installé. Retirez le support et redémarrez.",
         "warn_vm": "Machine Virtuelle Détectée", "warn_power": "Fonctionnement sur Batterie", "net_err": "Pas de connexion Internet."
     },
     "de": {
@@ -114,7 +121,7 @@ TEXT = {
         "luks": "Festplattenverschlüsselung (LUKS)", "luks_p": "Verschlüsselungspasswort", "host": "Computername", "user_name": "Benutzername (keine Leerzeichen)",
         "pass": "Passwort", "pass_c": "Passwort bestätigen", "err_pass": "Passwörter stimmen nicht überein.", "err_disk": "Bitte wählen Sie eine Festplatte aus.",
         "err_user": "Benutzername und Hostname sind erforderlich.", "summary_title": "Zusammenfassung", "summary_warn": "Warnung: Alle Daten auf der ausgewählten Festplatte werden gelöscht.",
-        "finish_msg": "Installation Abgeschlossen", "finish_sub": "Arvor Linux wurde erfolgreich installiert. Der UEFI-Boot-Eintrag wurde automatisch mit efibootmgr konfiguriert. Entfernen Sie das Medium und starten Sie neu.",
+        "finish_msg": "Installation Abgeschlossen", "finish_sub": "Arvor Linux wurde erfolgreich installiert. Entfernen Sie das Medium und starten Sie neu.",
         "warn_vm": "Virtuelle Maschine Erkannt", "warn_power": "Akkubetrieb Erkannt", "net_err": "Keine Internetverbindung erkannt."
     },
     "gl": {
@@ -126,7 +133,7 @@ TEXT = {
         "luks": "Activar Cifrado de Disco (LUKS)", "luks_p": "Contrasinal de Cifrado", "host": "Nome do Computador", "user_name": "Nome de usuario (sen espazos)",
         "pass": "Contrasinal", "pass_c": "Confirmar Contrasinal", "err_pass": "Os contrasinais non coinciden.", "err_disk": "Seleccione unha unidade.",
         "err_user": "Nome de usuario e hostname son obrigatorios.", "summary_title": "Resumo da Instalación", "summary_warn": "Aviso: Todos os datos na unidade seleccionada serán eliminados.",
-        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux instalouse correctamente. O arranque UEFI configurouse automaticamente con efibootmgr. Retire o medio e reinicie.",
+        "finish_msg": "Instalación Completada", "finish_sub": "Arvor Linux instalouse correctamente. Retire o medio e reinicie.",
         "warn_vm": "Máquina Virtual Detectada", "warn_power": "Executando con Batería", "net_err": "Non se detectou conexión a Internet."
     }
 }
@@ -411,6 +418,7 @@ Pin: release *
 Pin-Priority: -2
 EOF
 
+
 for f in /etc/os-release /usr/lib/os-release /etc/lsb-release /etc/issue /etc/issue.net /etc/debian_version; do
     if [ -e "$f" ] || [ -L "$f" ]; then
         cp -a "$f" "$f.custom_bak"
@@ -486,17 +494,30 @@ vgchange -ay arvor_vg || true
 SCRIPT
 chmod +x /etc/initramfs-tools/scripts/local-top/activate_lvm
 
+touch /etc/default/grub
+
 sed -i 's|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX="rd.lvm.lv=arvor_vg/root"|' /etc/default/grub || true
 grep -q "rd.lvm.lv" /etc/default/grub || echo 'GRUB_CMDLINE_LINUX="rd.lvm.lv=arvor_vg/root"' >> /etc/default/grub
 
+rm -rf /etc/motd
+
 update-initramfs -c -k all || update-initramfs -u
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=arvor-linux || true
-efibootmgr -c -d {self.conf["disk"]} -p 1 -L "Arvor Linux" -l "\\EFI\\arvor-linux\\grubx64.efi" || true
+
+grub-install \
+    --target=x86_64-efi \
+    --efi-directory=/boot/efi \
+    --bootloader-id=ArvorLinux \
+    --recheck
+
 update-grub || true
 
-if [ -x /usr/bin/nsm ]; then
-    nsm create first-snapshot || true
-fi
+efibootmgr --create \
+    --disk {disk} \
+    --part 1 \
+    --label "Arvor Linux" \
+    --loader '\\EFI\\ArvorLinux\\grubx64.efi' || true
+
+lvmabd_start 1 &
 napt sync
 apt-get clean
 rm /s.sh
