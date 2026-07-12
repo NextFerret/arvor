@@ -29,30 +29,38 @@ FILES = [
 ]
 
 STYLES = """
-QMainWindow{background:#f8fafc;}
-QWidget{font:14px "Segoe UI",sans-serif;color:#0f172a;}
-QListWidget{background:#0f172a;border:none;padding:28px 0;}
-QListWidget::item{padding:15px 22px;color:#94a3b8;border-left:3px solid transparent;}
-QListWidget::item:hover{background:#1e293b;color:#f8fafc;}
-QListWidget::item:selected{background:#334155;color:#fff;border-left:3px solid #6366f1;}
-QLabel{color:#0f172a;}
-QLabel[heading="true"]{font-size:33px;font-weight:600;color:#0f172a;}
-QLabel[subheading="true"]{font-size:16px;color:#475569;}
-QPushButton{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:11px 24px;color:#334155;}
-QPushButton:hover{background:#f1f5f9;border-color:#6366f1;}
-QPushButton[primary="true"]{background:#6366f1;color:#fff;border:none;}
-QPushButton[primary="true"]:hover{background:#4f46e5;}
-QLineEdit,QComboBox{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;color:#0f172a;selection-background-color:#6366f1;}
-QLineEdit:focus,QComboBox:focus{border:1px solid #6366f1;background:#f8fafc;}
+QMainWindow{background:#f5f7fb;}
+QWidget{font:14px "Segoe UI",sans-serif;color:#243042;}
+
+QListWidget{background:#162033;border:none;padding:28px 0;}
+QListWidget::item{padding:15px 22px;color:#8e9db4;border-left:3px solid transparent;}
+QListWidget::item:hover{background:#202c42;color:#eef4ff;}
+QListWidget::item:selected{background:#27344d;color:#fff;border-left:3px solid #4a78ff;}
+
+QLabel{color:#243042;}
+QLabel[heading="true"]{font-size:33px;font-weight:600;color:#172033;}
+QLabel[subheading="true"]{font-size:16px;color:#66758d;}
+
+QPushButton{background:#fff;border:1px solid #d9e1eb;border-radius:12px;padding:11px 24px;color:#314056;}
+QPushButton:hover{background:#f8faff;border-color:#4a78ff;}
+QPushButton[primary="true"]{background:#4a78ff;color:#fff;border:none;}
+QPushButton[primary="true"]:hover{background:#3868ef;}
+
+QLineEdit,QComboBox{background:#fff;border:1px solid #d9e1eb;border-radius:12px;padding:12px;color:#243042;selection-background-color:#4a78ff;}
+QLineEdit:focus,QComboBox:focus{border:1px solid #4a78ff;background:#fbfcff;}
 QComboBox::drop-down{border:none;width:24px;}
-QFrame[card="true"]{background:#fff;border:1px solid #e2e8f0;border-radius:18px;}
-QFrame[alert="warning"]{background:#fefce8;border:1px solid #fef08a;border-radius:10px;}
-QLabel[alert-text="warning"]{color:#a16207;}
-QFrame[alert="danger"]{background:#fef2f2;border:1px solid #fee2e2;border-radius:10px;}
-QLabel[alert-text="danger"]{color:#b91c1c;}
-QTextEdit[log="true"]{background:#0f172a;color:#4ade80;border:none;border-radius:12px;padding:14px;font:13px Consolas;}
-QProgressBar{background:#e2e8f0;border:none;border-radius:6px;height:16px;text-align:center;color:#0f172a;font-weight:bold;}
-QProgressBar::chunk{border-radius:6px;background:#6366f1;}
+
+QFrame[card="true"]{background:#fff;border:1px solid #e5ebf3;border-radius:18px;}
+
+QFrame[alert="warning"]{background:#fff8ea;border:1px solid #f1d184;border-radius:10px;}
+QLabel[alert-text="warning"]{color:#8c5a0b;}
+QFrame[alert="danger"]{background:#fff1f1;border:1px solid #f3b7b7;border-radius:10px;}
+QLabel[alert-text="danger"]{color:#b02b2b;}
+
+QTextEdit[log="true"]{background:#131d2d;color:#68d391;border:none;border-radius:12px;padding:14px;font:13px Consolas;}
+
+QProgressBar{background:#e4eaf2;border:none;border-radius:6px;height:12px;text-align:center;}
+QProgressBar::chunk{border-radius:6px;background:#4a78ff;}
 """
 
 TEXT = {
@@ -495,19 +503,10 @@ rm -rf /etc/motd
 
 update-initramfs -c -k all || update-initramfs -u
 
-grub-install \
-    --target=x86_64-efi \
-    --efi-directory=/boot/efi \
-    --bootloader-id=ArvorLinux \
-    --recheck
-
+update-initramfs -c -k all || update-initramfs -u
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=arvor-linux || true
+efibootmgr -c -d {self.conf["disk"]} -p 1 -L "Arvor Linux" -l "\\EFI\\arvor-linux\\grubx64.efi" || true
 update-grub || true
-
-efibootmgr --create \
-    --disk {disk} \
-    --part 1 \
-    --label "Arvor Linux" \
-    --loader '\\EFI\\ArvorLinux\\grubx64.efi' || true
 
 lvmabd_start 1 &
 napt sync
