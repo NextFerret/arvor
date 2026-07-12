@@ -29,31 +29,30 @@ FILES = [
 ]
 
 STYLES = """
-QMainWindow { background-color: #f8fafc; }
-QWidget { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; }
-QListWidget { background-color: #0f172a; border: none; outline: none; padding-top: 35px; }
-QListWidget::item { color: #94a3b8; padding: 18px 24px; border-left: 4px solid transparent; font-weight: 600; font-size: 15px; }
-QListWidget::item:selected { background-color: #1e293b; color: #ffffff; border-left: 4px solid #3b82f6; }
-QListWidget::item:hover:!selected { background-color: #1e293b; color: #e2e8f0; }
-QLabel { color: #1e293b; }
-QLabel[heading="true"] { font-size: 36px; font-weight: 800; color: #0f172a; letter-spacing: -0.5px; margin-bottom: 4px; }
-QLabel[subheading="true"] { font-size: 16px; color: #64748b; margin-bottom: 30px; font-weight: 400; }
-QPushButton { background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 28px; color: #475569; font-weight: 600; font-size: 15px; }
-QPushButton:hover { background-color: #f1f5f9; border-color: #cbd5e1; color: #0f172a; }
-QPushButton:disabled { background-color: #f8fafc; color: #cbd5e1; border-color: #e2e8f0; }
-QPushButton[primary="true"] { background-color: #3b82f6; border: none; color: white; }
-QPushButton[primary="true"]:hover { background-color: #2563eb; }
-QLineEdit, QComboBox { padding: 14px; border: 1.5px solid #e2e8f0; border-radius: 12px; background-color: white; font-size: 15px; color: #1e293b; selection-background-color: #3b82f6; }
-QLineEdit:focus, QComboBox:focus { border: 1.5px solid #3b82f6; outline: none; background-color: #f8fafc; }
-QComboBox::drop-down { border: none; padding-right: 15px; }
-QFrame[card="true"] { background-color: white; border-radius: 20px; border: 1px solid #e2e8f0; }
-QFrame[alert="warning"] { background-color: #fef3c7; border: 1px solid #fde68a; border-radius: 12px; }
-QLabel[alert-text="warning"] { color: #92400e; font-weight: 600; }
-QFrame[alert="danger"] { background-color: #fee2e2; border: 1px solid #fecaca; border-radius: 12px; }
-QLabel[alert-text="danger"] { color: #991b1b; font-weight: 600; }
-QTextEdit[log="true"] { background-color: #0f172a; color: #4ade80; font-family: 'Consolas', monospace; border-radius: 12px; border: none; padding: 15px; font-size: 13px; }
-QProgressBar { border: none; background-color: #e2e8f0; border-radius: 8px; height: 14px; text-align: center; font-size: 12px; color: #0f172a; }
-QProgressBar::chunk { background: qlineargradient(spread:pad, x1:0, y1:0.5, x2:1, y2:0.5, stop:0 #3b82f6, stop:1 #60a5fa); border-radius: 8px; }
+QMainWindow{background:#f8fafc;}
+QWidget{font:14px "Segoe UI",sans-serif;color:#0f172a;}
+QListWidget{background:#0f172a;border:none;padding:28px 0;}
+QListWidget::item{padding:15px 22px;color:#94a3b8;border-left:3px solid transparent;}
+QListWidget::item:hover{background:#1e293b;color:#f8fafc;}
+QListWidget::item:selected{background:#334155;color:#fff;border-left:3px solid #6366f1;}
+QLabel{color:#0f172a;}
+QLabel[heading="true"]{font-size:33px;font-weight:600;color:#0f172a;}
+QLabel[subheading="true"]{font-size:16px;color:#475569;}
+QPushButton{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:11px 24px;color:#334155;}
+QPushButton:hover{background:#f1f5f9;border-color:#6366f1;}
+QPushButton[primary="true"]{background:#6366f1;color:#fff;border:none;}
+QPushButton[primary="true"]:hover{background:#4f46e5;}
+QLineEdit,QComboBox{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;color:#0f172a;selection-background-color:#6366f1;}
+QLineEdit:focus,QComboBox:focus{border:1px solid #6366f1;background:#f8fafc;}
+QComboBox::drop-down{border:none;width:24px;}
+QFrame[card="true"]{background:#fff;border:1px solid #e2e8f0;border-radius:18px;}
+QFrame[alert="warning"]{background:#fefce8;border:1px solid #fef08a;border-radius:10px;}
+QLabel[alert-text="warning"]{color:#a16207;}
+QFrame[alert="danger"]{background:#fef2f2;border:1px solid #fee2e2;border-radius:10px;}
+QLabel[alert-text="danger"]{color:#b91c1c;}
+QTextEdit[log="true"]{background:#0f172a;color:#4ade80;border:none;border-radius:12px;padding:14px;font:13px Consolas;}
+QProgressBar{background:#e2e8f0;border:none;border-radius:6px;height:16px;text-align:center;color:#0f172a;font-weight:bold;}
+QProgressBar::chunk{border-radius:6px;background:#6366f1;}
 """
 
 TEXT = {
