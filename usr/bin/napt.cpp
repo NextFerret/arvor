@@ -123,19 +123,30 @@ static int exec_argv(const vector<string>& args, int stdout_fd = -1, int stderr_
     if (pid < 0) return 1;
 
     if (pid == 0) {
-        if (stdout_fd >= 0 && stdout_fd != STDOUT_FILENO) {
+        int devnull_r = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (devnull_r >= 0) { dup2(devnull_r, STDIN_FILENO); close(devnull_r); }
+
+        if (stdout_fd >= 0 && stdout_fd != STDOUT_FILENO)
             dup2(stdout_fd, STDOUT_FILENO);
-            close(stdout_fd);
-        }
-        if (stderr_fd >= 0 && stderr_fd != STDERR_FILENO) {
+        if (stderr_fd >= 0 && stderr_fd != STDERR_FILENO)
             dup2(stderr_fd, STDERR_FILENO);
-            close(stderr_fd);
-        }
         if (extra_fd >= 0 && extra_fd != 3) {
             dup2(extra_fd, 3);
-            close(extra_fd);
             fcntl(3, F_SETFD, 0);
         }
+
+        if (stdout_fd >= 0 && stdout_fd != STDOUT_FILENO &&
+            stdout_fd != STDERR_FILENO && stdout_fd != 3)
+            close(stdout_fd);
+        if (stderr_fd >= 0 && stderr_fd != STDERR_FILENO &&
+            stderr_fd != STDOUT_FILENO && stderr_fd != 3 &&
+            stderr_fd != stdout_fd)
+            close(stderr_fd);
+        if (extra_fd >= 0 && extra_fd != 3 &&
+            extra_fd != STDOUT_FILENO && extra_fd != STDERR_FILENO)
+            close(extra_fd);
+
+        for (int fd = 4; fd < 1024; ++fd) close(fd);
 
         vector<char*> argv_ptrs;
         argv_ptrs.reserve(args.size() + 1);
@@ -172,8 +183,11 @@ static string exec_argv_capture(const vector<string>& args) {
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        int devnull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        int devnull_r = open("/dev/null", O_RDONLY);
+        if (devnull_r >= 0) { dup2(devnull_r, STDIN_FILENO); close(devnull_r); }
+        for (int fd = 3; fd < 1024; ++fd) close(fd);
 
         vector<char*> argv_ptrs;
         argv_ptrs.reserve(args.size() + 1);
@@ -365,6 +379,22 @@ bool manage_sandbox(const string& action) {
 
         if (rc != 0) {
             cout << "Error: LVM snapshot of " << root_dev << " failed (rc=" << rc << ").\n";
+            return false;
+        }
+
+        exec_argv_devnull_out({"lvchange", "-ay", "--ignoreactivationskip", snap_dev});
+        exec_argv_devnull_out({"udevadm", "settle"});
+
+        struct stat dev_st;
+        bool dev_ready = false;
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            if (stat(snap_dev.c_str(), &dev_st) == 0 && S_ISBLK(dev_st.st_mode)) { dev_ready = true; break; }
+            usleep(100000);
+        }
+
+        if (!dev_ready) {
+            cout << "Error: snapshot device " << snap_dev << " never became available.\n";
+            exec_argv_devnull_out({"lvremove", "-f", snap_dev});
             return false;
         }
 
@@ -790,29 +820,6 @@ string calculate_sha256(const string& file_path) {
     return trim_copy(out);
 }
 
-struct DebFileInfo {
-    string package_name;
-    string version;
-    string architecture;
-};
-
-bool get_deb_file_info(const string& path, DebFileInfo& info) {
-    string out = exec_argv_capture({"dpkg-deb", "--field", path, "Package", "Version", "Architecture"});
-    if (out.empty()) return false;
-    istringstream ss(out);
-    string line;
-    while (getline(ss, line)) {
-        size_t colon = line.find(':');
-        if (colon == string::npos) continue;
-        string key   = trim_copy(line.substr(0, colon));
-        string value = trim_copy(line.substr(colon + 1));
-        if (key == "Package")           info.package_name = value;
-        else if (key == "Version")      info.version      = value;
-        else if (key == "Architecture") info.architecture = value;
-    }
-    return !info.package_name.empty();
-}
-
 bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet) {
     if (pkgs.empty()) {
         if (!quiet) cout << "No packages were specified.\n";
@@ -830,23 +837,11 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
                 had_error = true;
                 continue;
             }
-            DebFileInfo deb_info;
-            bool has_info = get_deb_file_info(pkg_name, deb_info);
-            if (!quiet) {
-                cout << "Installing local .deb: ";
-                if (has_info) {
-                    cout << deb_info.package_name;
-                    if (!deb_info.version.empty())      cout << " (" << deb_info.version << ")";
-                    if (!deb_info.architecture.empty()) cout << " [" << deb_info.architecture << "]";
-                } else {
-                    cout << pkg_name;
-                }
-                cout << "\n";
-            }
+            if (!quiet) cout << "Installing local .deb: " << pkg_name << "\n";
             InstallDecision decision;
-            decision.package_name     = has_info ? deb_info.package_name : pkg_name;
+            decision.package_name     = pkg_name;
             decision.apt_argument     = pkg_name;
-            decision.selected_version = has_info ? deb_info.version : "";
+            decision.selected_version = "";
             decision.from_napt        = false;
             decisions.push_back(decision);
             continue;
@@ -1001,30 +996,6 @@ static void render_chroot_bar(int filled, const string& time_str) {
     cout.flush();
 }
 
-static vector<string> stage_debs_for_chroot(const vector<string>& orig_argv, vector<string>& staged_host_paths) {
-    vector<string> rewritten;
-    for (const auto& token : orig_argv) {
-        if (token.size() > 4 && ends_with(token, ".deb")) {
-            string filename = path_basename(token);
-            string chroot_tmp_host  = TREE_ROOT + "/tmp/" + filename;
-            string chroot_tmp_inner = "/tmp/" + filename;
-            exec_argv_devnull_out({"mkdir", "-p", TREE_ROOT + "/tmp"});
-            int rc = exec_argv_devnull_out({"cp", token, chroot_tmp_host});
-            if (rc != 0) cout << "Error: failed to stage " << token << " into chroot tmp.\n";
-            staged_host_paths.push_back(chroot_tmp_host);
-            rewritten.push_back(chroot_tmp_inner);
-        } else {
-            rewritten.push_back(token);
-        }
-    }
-    return rewritten;
-}
-
-static void cleanup_staged_debs(const vector<string>& staged_host_paths) {
-    for (const auto& p : staged_host_paths)
-        exec_argv_devnull_out({"rm", "-f", p});
-}
-
 void perform_transaction_argv(const vector<string>& transaction_argv, bool apply_host) {
     if (!apply_host) {
         if (!manage_sandbox("create")) {
@@ -1038,8 +1009,7 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
         int err_pipe[2]  = {-1, -1};
         bool have_err    = (pipe2(err_pipe, O_CLOEXEC) == 0);
 
-        vector<string> staged_debs;
-        vector<string> chroot_argv = stage_debs_for_chroot(transaction_argv, staged_debs);
+        vector<string> chroot_argv = transaction_argv;
 
         if (have_pipe) {
             chroot_argv.push_back("-o");
@@ -1056,7 +1026,10 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
                 _exit(1);
             }
 
-            int devnull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            int devnull_r = open("/dev/null", O_RDONLY);
+            if (devnull_r >= 0) { dup2(devnull_r, STDIN_FILENO); close(devnull_r); }
+
+            int devnull = open("/dev/null", O_WRONLY);
             if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
 
             if (have_err) {
@@ -1066,7 +1039,7 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
                     close(err_pipe[1]);
                 }
             } else {
-                int dn2 = open("/dev/null", O_WRONLY | O_CLOEXEC);
+                int dn2 = open("/dev/null", O_WRONLY);
                 if (dn2 >= 0) { dup2(dn2, STDERR_FILENO); close(dn2); }
             }
 
@@ -1075,6 +1048,8 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
                 if (apt_pipe[1] != 3) { dup2(apt_pipe[1], 3); close(apt_pipe[1]); }
                 fcntl(3, F_SETFD, 0);
             }
+
+            for (int fd = 4; fd < 1024; ++fd) close(fd);
 
             pkgInitConfig(*_config);
             pkgInitSystem(*_config, _system);
@@ -1175,7 +1150,6 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
             }
 
             umount_fs();
-            cleanup_staged_debs(staged_debs);
             manage_sandbox("delete");
 
             auto print_bar = [&](const string& suffix) {
@@ -1225,6 +1199,9 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
 
     pid_t host_pid = fork();
     if (host_pid == 0) {
+        int devnull_r = open("/dev/null", O_RDONLY);
+        if (devnull_r >= 0) { dup2(devnull_r, STDIN_FILENO); close(devnull_r); }
+        for (int fd = 3; fd < 1024; ++fd) close(fd);
         setenv("DEBIAN_FRONTEND", "noninteractive", 1);
         execvp(argv_ptrs[0], argv_ptrs.data());
         _exit(127);
