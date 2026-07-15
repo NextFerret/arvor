@@ -222,40 +222,75 @@ static void clear_lvmabd_tags(const char *vg, const char *lv) {
     }
 }
 
+static void ensure_installed_binary(void) {
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) {
+        syslog(LOG_ERR, "readlink(/proc/self/exe) failed: %s", strerror(errno));
+        return;
+    }
+    self[n] = 0;
+    if (strcmp(self, "/usr/local/sbin/lvmabd_start") == 0) return;
+
+    char *args[] = {"install", "-m", "755", self, "/usr/local/sbin/lvmabd_start", NULL};
+    int rc = run_execvp(args);
+    if (rc != 0) {
+        syslog(LOG_ERR, "failed to install binary from %s to /usr/local/sbin/lvmabd_start (exit %d)", self, rc);
+    } else {
+        syslog(LOG_INFO, "installed binary from %s to /usr/local/sbin/lvmabd_start", self);
+    }
+}
+
 static void install_systemd(void) {
     char chkout[64];
     char *chk[] = {"systemctl", "is-enabled", "lvmabd.timer", NULL};
-    if (run_capture(chk, chkout, sizeof(chkout)) == 0) return;
+    if (run_capture(chk, chkout, sizeof(chkout)) == 0) {
+        syslog(LOG_INFO, "lvmabd.timer already enabled, skipping reinstall");
+        return;
+    }
 
     FILE *f = fopen("/etc/systemd/system/lvmabd.service", "w");
-    if (f) {
-        fprintf(f,
-            "[Unit]\n"
-            "Description=lvmabd snapshot refresh\n"
-            "\n"
-            "[Service]\n"
-            "Type=oneshot\n"
-            "ExecStart=/usr/local/sbin/lvmabd_start 1\n");
-        fclose(f);
+    if (!f) {
+        syslog(LOG_ERR, "cannot write lvmabd.service: %s", strerror(errno));
+        return;
     }
+    fprintf(f,
+        "[Unit]\n"
+        "Description=lvmabd snapshot refresh\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/local/sbin/lvmabd_start 1\n");
+    fclose(f);
+
     f = fopen("/etc/systemd/system/lvmabd.timer", "w");
-    if (f) {
-        fprintf(f,
-            "[Unit]\n"
-            "Description=lvmabd boot success trigger\n"
-            "\n"
-            "[Timer]\n"
-            "OnBootSec=3min\n"
-            "AccuracySec=10s\n"
-            "\n"
-            "[Install]\n"
-            "WantedBy=timers.target\n");
-        fclose(f);
+    if (!f) {
+        syslog(LOG_ERR, "cannot write lvmabd.timer: %s", strerror(errno));
+        return;
     }
+    fprintf(f,
+        "[Unit]\n"
+        "Description=lvmabd boot success trigger\n"
+        "\n"
+        "[Timer]\n"
+        "OnBootSec=3min\n"
+        "AccuracySec=10s\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n");
+    fclose(f);
+
     char *a1[] = {"systemctl", "daemon-reload", NULL};
-    run_execvp(a1);
+    int rc1 = run_execvp(a1);
+    if (rc1 != 0) syslog(LOG_ERR, "systemctl daemon-reload failed (exit %d)", rc1);
+
     char *a2[] = {"systemctl", "enable", "--now", "lvmabd.timer", NULL};
-    run_execvp(a2);
+    int rc2 = run_execvp(a2);
+    if (rc2 != 0) {
+        syslog(LOG_ERR, "systemctl enable --now lvmabd.timer failed (exit %d)", rc2);
+    } else {
+        syslog(LOG_INFO, "lvmabd.timer enabled and started");
+    }
 }
 
 static const char *INITRAMFS_HOOK =
@@ -444,6 +479,7 @@ int main(int argc, char **argv) {
     if (get_vg_lv(dev, vg, sizeof(vg), lv, sizeof(lv)) != 0) return 1;
     if (refresh_snapshot(vg, lv) != 0) return 1;
     clear_lvmabd_tags(vg, lv);
+    ensure_installed_binary();
     install_systemd();
     install_initramfs();
     syslog(LOG_INFO, "done");
