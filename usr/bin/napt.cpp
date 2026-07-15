@@ -34,6 +34,12 @@
 #include <apt-pkg/upgrade.h>
 #include <apt-pkg/error.h>
 #include <apt-pkg/version.h>
+#include <apt-pkg/install-progress.h>
+#include <apt-pkg/debfile.h>
+#include <apt-pkg/fileutl.h>
+#include <apt-pkg/tagfile.h>
+#include <apt-pkg/update.h>
+#include <memory>
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -82,13 +88,14 @@ struct InstallDecision {
 };
 
 void perform_install_transaction(const vector<string>& pkgs, bool apply_host);
+bool run_libapt_transaction(const string& action, const vector<string>& targets, int status_fd, bool quiet);
 
 bool nf_tree_available() {
     return access(NF_TREE_BIN.c_str(), X_OK) == 0;
 }
 
 void show_help() {
-    cout << "New Advanced Packaging Tool - napt 2.0\n\n"
+    cout << "New Advanced Packaging Tool - napt 3.0\n\n"
          << "Usage: napt [command] [options]\n\n"
          << "Commands:\n"
          << "  install          Installs packages or local .deb files in a chroot; applies to host only if successful.\n"
@@ -262,34 +269,6 @@ PrecheckResult precheck_transaction(const string& action, const vector<string>& 
     }
 
     return has_changes ? PrecheckResult::Proceed : PrecheckResult::NoChanges;
-}
-
-static vector<string> build_apt_argv(const string& action, const vector<string>& pkgs, bool quiet) {
-    vector<string> argv = {"apt-get", "-y"};
-    if (quiet) argv.push_back("-qq");
-
-    if (action == "install" || action == "remove" || action == "purge") {
-        if (pkgs.empty()) return {};
-        argv.push_back(action);
-        for (const auto& p : pkgs) argv.push_back(p);
-        return argv;
-    }
-
-    if (action == "upgrade" || action == "dist-upgrade") {
-        argv.push_back(action);
-        return argv;
-    }
-
-    return {};
-}
-
-static vector<string> build_apt_install_argv(const vector<string>& args, bool quiet) {
-    if (args.empty()) return {};
-    vector<string> argv = {"apt-get", "-y"};
-    if (quiet) argv.push_back("-qq");
-    argv.push_back("install");
-    for (const auto& a : args) argv.push_back(a);
-    return argv;
 }
 
 void mount_fs() {
@@ -478,6 +457,161 @@ bool starts_with(const string& value, const string& prefix) {
 bool ends_with(const string& value, const string& suffix) {
     return value.size() >= suffix.size() &&
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+class NaptAcquireStatus final : public pkgAcquireStatus {
+    int fd;
+public:
+    explicit NaptAcquireStatus(int fd_) : fd(fd_) {}
+    bool MediaChange(string, string) override { return false; }
+    bool Pulse(pkgAcquire* owner) override {
+        pkgAcquireStatus::Pulse(owner);
+        if (fd < 0) return true;
+        string line = "dlstatus:0:" + to_string(Percent) + ":Downloading\n";
+        ssize_t written = write(fd, line.c_str(), line.size());
+        (void)written;
+        return true;
+    }
+};
+
+class NaptHostProgress final : public APT::Progress::PackageManager {
+public:
+    bool StatusChanged(string, unsigned int, unsigned int, string) override {
+        return true;
+    }
+};
+
+static string local_deb_package_name(const string& path) {
+    FileFd fd;
+    if (!fd.Open(path, FileFd::ReadOnly)) return "";
+    debDebFile deb(fd);
+    debDebFile::MemControlExtract extract;
+    if (!extract.Read(deb)) return "";
+    return extract.Section.FindS("Package");
+}
+
+static bool register_local_debs(pkgSourceList* src_list, const vector<string>& targets,
+                                 map<string, string>& local_pkg_names, bool quiet) {
+    for (const auto& t : targets) {
+        if (!ends_with(t, ".deb")) continue;
+        string pkg_name = local_deb_package_name(t);
+        if (pkg_name.empty()) {
+            if (!quiet) cout << "Could not determine package name for " << t << ".\n";
+            _error->DumpErrors();
+            return false;
+        }
+        if (!src_list->AddVolatileFile(t)) {
+            if (!quiet) cout << "Failed to register local package " << t << ".\n";
+            _error->DumpErrors();
+            return false;
+        }
+        local_pkg_names[t] = pkg_name;
+    }
+    return true;
+}
+
+bool run_libapt_transaction(const string& action, const vector<string>& targets,
+                             int status_fd, bool quiet) {
+    if (status_fd >= 0) _config->Set("APT::Status-Fd", status_fd);
+    _config->Set("Dpkg::Use-Pty", "false");
+
+    pkgCacheFile cache_file;
+    pkgSourceList* src_list = cache_file.GetSourceList();
+    if (src_list == nullptr) { _error->DumpErrors(); return false; }
+
+    map<string, string> local_pkg_names;
+    if (!register_local_debs(src_list, targets, local_pkg_names, quiet)) return false;
+
+    pkgCache* cache = cache_file.GetPkgCache();
+    pkgDepCache* dep_cache = cache_file.GetDepCache();
+    if (cache == nullptr || dep_cache == nullptr) { _error->DumpErrors(); return false; }
+
+    pkgProblemResolver fixer(dep_cache);
+
+    if (action == "install") {
+        for (const auto& t : targets) {
+            string pkg_name = ends_with(t, ".deb") ? local_pkg_names[t] : t;
+            pkgCache::PkgIterator pkg = cache->FindPkg(pkg_name);
+            if (pkg.end()) {
+                if (!quiet) cout << "Package " << pkg_name << " not found.\n";
+                return false;
+            }
+            fixer.Clear(pkg);
+            fixer.Protect(pkg);
+            dep_cache->MarkInstall(pkg, true);
+            if (!(*dep_cache)[pkg].Install()) {
+                if (!quiet) cout << "Unable to mark " << pkg_name << " for installation.\n";
+                _error->DumpErrors();
+                return false;
+            }
+        }
+    } else if (action == "remove" || action == "purge") {
+        bool purge = (action == "purge");
+        for (const auto& pkg_name : targets) {
+            pkgCache::PkgIterator pkg = cache->FindPkg(pkg_name);
+            if (pkg.end()) continue;
+            fixer.Clear(pkg);
+            fixer.Protect(pkg);
+            dep_cache->MarkDelete(pkg, purge);
+        }
+    } else if (action == "upgrade") {
+        if (!APT::Upgrade::Upgrade(*dep_cache,
+                APT::Upgrade::FORBID_REMOVE_PACKAGES | APT::Upgrade::FORBID_INSTALL_NEW_PACKAGES)) {
+            _error->DumpErrors();
+            return false;
+        }
+    } else if (action == "dist-upgrade") {
+        if (!APT::Upgrade::Upgrade(*dep_cache, APT::Upgrade::ALLOW_EVERYTHING)) {
+            _error->DumpErrors();
+            return false;
+        }
+    } else {
+        if (!quiet) cout << "Unknown transaction: " << action << ".\n";
+        return false;
+    }
+
+    if (!fixer.Resolve(true) || _error->PendingError()) {
+        if (!quiet) cout << "Unable to resolve dependencies for this transaction.\n";
+        _error->DumpErrors();
+        return false;
+    }
+
+    unique_ptr<pkgPackageManager> pm(_system->CreatePM(dep_cache));
+    if (!pm) { _error->DumpErrors(); return false; }
+
+    pkgAcquire fetcher;
+    pkgRecords recs(*cache);
+
+    if (!pm->GetArchives(&fetcher, src_list, &recs) || _error->PendingError()) {
+        _error->DumpErrors();
+        return false;
+    }
+
+    NaptAcquireStatus acquire_status(status_fd);
+    fetcher.SetLog(&acquire_status);
+    if (fetcher.Run() != pkgAcquire::Continue) {
+        _error->DumpErrors();
+        return false;
+    }
+
+    unique_ptr<APT::Progress::PackageManager> pm_progress;
+    if (status_fd >= 0)
+        pm_progress = make_unique<APT::Progress::PackageManagerProgressFd>(status_fd);
+    else if (!quiet)
+        pm_progress = make_unique<NaptHostProgress>();
+    else
+        pm_progress = make_unique<APT::Progress::PackageManager>();
+
+    pkgPackageManager::OrderResult result = pm->DoInstall(pm_progress.get());
+    if (!quiet && status_fd < 0 && result == pkgPackageManager::Completed) {
+        cout << "Progress: 100%\n";
+    }
+    if (result != pkgPackageManager::Completed) {
+        _error->DumpErrors();
+        return false;
+    }
+
+    return true;
 }
 
 bool path_is_directory(const string& path) {
@@ -932,6 +1066,7 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
 }
 
 void do_nflinux_upgrade(bool apply_host) {
+    (void)apply_host;
 #ifdef nflinux
     string os_release = fetch_url("https://nextferret.github.io/etc/os-release");
     if (!os_release.empty()) {
@@ -996,7 +1131,7 @@ static void render_chroot_bar(int filled, const string& time_str) {
     cout.flush();
 }
 
-void perform_transaction_argv(const vector<string>& transaction_argv, bool apply_host) {
+void perform_transaction_argv(const string& action, const vector<string>& targets, bool apply_host) {
     if (!apply_host) {
         if (!manage_sandbox("create")) {
             cout << "Aborting transaction: chroot could not be created.\n";
@@ -1009,19 +1144,15 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
         int err_pipe[2]  = {-1, -1};
         bool have_err    = (pipe2(err_pipe, O_CLOEXEC) == 0);
 
-        vector<string> chroot_argv = transaction_argv;
-
-        if (have_pipe) {
-            chroot_argv.push_back("-o");
-            chroot_argv.push_back("APT::Status-Fd=3");
-        }
-
+        cout.flush();
+        cerr.flush();
         pid_t pid = fork();
         if (pid == 0) {
             if (chroot(TREE_ROOT.c_str()) != 0 || chdir("/") != 0) {
                 if (have_err) {
                     const char* msg = "chroot/chdir failed\n";
-                    write(err_pipe[1], msg, strlen(msg));
+                    ssize_t written = write(err_pipe[1], msg, strlen(msg));
+                    (void)written;
                 }
                 _exit(1);
             }
@@ -1043,10 +1174,12 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
                 if (dn2 >= 0) { dup2(dn2, STDERR_FILENO); close(dn2); }
             }
 
+            int status_fd = -1;
             if (have_pipe) {
                 close(apt_pipe[0]);
                 if (apt_pipe[1] != 3) { dup2(apt_pipe[1], 3); close(apt_pipe[1]); }
                 fcntl(3, F_SETFD, 0);
+                status_fd = 3;
             }
 
             for (int fd = 4; fd < 1024; ++fd) close(fd);
@@ -1054,14 +1187,11 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
             pkgInitConfig(*_config);
             pkgInitSystem(*_config, _system);
 
-            vector<char*> argv_ptrs;
-            argv_ptrs.reserve(chroot_argv.size() + 1);
-            for (const auto& a : chroot_argv) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
-            argv_ptrs.push_back(nullptr);
-
             setenv("DEBIAN_FRONTEND", "noninteractive", 1);
-            execvp(argv_ptrs[0], argv_ptrs.data());
-            _exit(127);
+            bool ok = run_libapt_transaction(action, targets, status_fd, true);
+            cout.flush();
+            cerr.flush();
+            _exit(ok ? 0 : 1);
 
         } else if (pid > 0) {
             if (have_pipe) close(apt_pipe[1]);
@@ -1192,19 +1322,18 @@ void perform_transaction_argv(const vector<string>& transaction_argv, bool apply
 
     bool snapshot_created = create_snapshot("apt-pre");
 
-    vector<char*> argv_ptrs;
-    argv_ptrs.reserve(transaction_argv.size() + 1);
-    for (const auto& a : transaction_argv) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
-    argv_ptrs.push_back(nullptr);
-
+    cout.flush();
+    cerr.flush();
     pid_t host_pid = fork();
     if (host_pid == 0) {
         int devnull_r = open("/dev/null", O_RDONLY);
         if (devnull_r >= 0) { dup2(devnull_r, STDIN_FILENO); close(devnull_r); }
         for (int fd = 3; fd < 1024; ++fd) close(fd);
         setenv("DEBIAN_FRONTEND", "noninteractive", 1);
-        execvp(argv_ptrs[0], argv_ptrs.data());
-        _exit(127);
+        bool ok = run_libapt_transaction(action, targets, -1, false);
+        cout.flush();
+        cerr.flush();
+        _exit(ok ? 0 : 1);
     }
 
     int host_status = 0;
@@ -1227,10 +1356,7 @@ void perform_transaction(const string& action, const vector<string>& pkgs, bool 
     PrecheckResult precheck = precheck_transaction(action, pkgs, false);
     if (precheck == PrecheckResult::Failed || precheck == PrecheckResult::NoChanges) return;
 
-    vector<string> argv = build_apt_argv(action, pkgs, false);
-    if (argv.empty()) { cout << "Invalid transaction request.\n"; return; }
-
-    perform_transaction_argv(argv, apply_host);
+    perform_transaction_argv(action, pkgs, apply_host);
 }
 
 void perform_install_transaction(const vector<string>& pkgs, bool apply_host) {
@@ -1241,10 +1367,7 @@ void perform_install_transaction(const vector<string>& pkgs, bool apply_host) {
     vector<string> args;
     for (const auto& decision : decisions) args.push_back(decision.apt_argument);
 
-    vector<string> argv = build_apt_install_argv(args, false);
-    if (argv.empty()) { cout << "Invalid transaction request.\n"; return; }
-
-    perform_transaction_argv(argv, apply_host);
+    perform_transaction_argv("install", args, apply_host);
 }
 
 void perform_global_upgrade(bool apply_host) {
@@ -1332,8 +1455,7 @@ void perform_global_upgrade(bool apply_host) {
 
     if (!napt_upgrade_args.empty()) {
         cout << "Upgrading NAPT packages first...\n";
-        vector<string> napt_argv = build_apt_install_argv(napt_upgrade_args, false);
-        perform_transaction_argv(napt_argv, apply_host);
+        perform_transaction_argv("install", napt_upgrade_args, apply_host);
     }
 
     cout << "Proceeding with standard apt upgrade...\n";
@@ -1367,9 +1489,18 @@ int main(int argc, char** argv) {
     if (geteuid() != 0) { cout << "Root privileges required.\n"; return 1; }
 
     if (command == "sync") {
-        int apt_rc = exec_argv({"apt-get", "update"});
+        pkgCacheFile cache_file;
+        pkgSourceList* src_list = cache_file.GetSourceList();
+        bool apt_ok = false;
+        if (src_list != nullptr) {
+            NaptAcquireStatus status(-1);
+            apt_ok = ListUpdate(status, *src_list);
+            if (!apt_ok) _error->DumpErrors();
+        } else {
+            _error->DumpErrors();
+        }
         bool napt_ok = sync_napt_metadata();
-        return (apt_rc == 0 && napt_ok) ? 0 : 1;
+        return (apt_ok && napt_ok) ? 0 : 1;
     } else if (command == "clean") {
         return clean_napt_cache() ? 0 : 1;
     } else if (command == "dist-upgrade") {
