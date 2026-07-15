@@ -6,88 +6,160 @@ ARM Readme:https://github.com/NextFerret/arvor/blob/main/README-ARM.md
 ## We Moved to XFS and LVM in the version 4.1.
 
 ## Arvor Linux 4.1 Will recive an ARM Version called Armvor.
-Arvor Linux is an Debian-Based Atomic&Mutable Solution.
 
-You may say "IT IS IMPOSSIBLE,IMMUTABLE = ATOMIC"
+**Arvor Linux** is a Debian-based Linux distribution designed to provide **atomic system updates without relying on an immutable root filesystem**.
 
-Wrong,lets start **The ✨ Annoying ✨ and ✨ Useless ✨ Dictionary Moment**
+Unlike many modern atomic distributions, Arvor separates the concepts of **atomicity** and **immutability**. The project focuses on reliable, transactional upgrades while preserving a traditional, fully mutable Linux environment.
 
+---
 
+# Atomic ≠ Immutable
 
-atomicity (noun)
+These terms are often used interchangeably, but they describe different concepts.
 
-Pronunciation: /ˌætəˈmɪsəti/
+## Atomicity
 
-Meaning:
+**Atomicity** is the property of an operation that either:
 
-(computing) The property of an operation or transaction being completed entirely or not at all, with no intermediate state visible.
-The quality of being atomic; indivisibility.
+- completes successfully; or
+- does not happen at all.
 
-Examples:
-
-The database guarantees atomicity for all transactions.
-Atomicity helps prevent data corruption during system updates.
-
-Related words:
-
-atomic (adjective)
-atomically (adverb)
-
-Plural: atomicities (rare)
-
-immutability (noun)
-
-Pronunciation: /ɪˌmjuːtəˈbɪləti/
-
-Meaning:
-
-The quality of being unable to be changed.
-(computing) The property of an object, file, or system state that cannot be modified after it is created.
+No partially applied state is ever exposed.
 
 Examples:
 
-Immutability is a key feature of many functional programming languages.
-The operating system uses immutability to protect the user from itself.
+- Transactional database commits
+- Transactional operating system updates
 
-Related words:
+Atomicity prevents incomplete upgrades from leaving the system in an inconsistent state.
 
-immutable (adjective)
-immutably (adverb)
+---
 
-Plural: immutabilities (rare)
+## Immutability
 
-...SEE?
+**Immutability** means an object or filesystem cannot be modified after it has been created.
 
-its not the same thing.
-anywaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay.
+Examples include:
 
-# Core Programs:
+- Read-only root filesystems
+- OSTree deployments
+- Container image layers
 
-`nsm` : the snapshot manager of Arvor
+Immutability is one possible implementation strategy for atomic updates, but **it is not a requirement**.
 
-`napt` : the atomic version of apt
+---
 
-`nlc` : chroot manager ← js added because i need a way more simplier to mount the chroot of this distro :3
+## Arvor's Approach
 
-# Minimum Requirements
+Arvor provides atomic upgrades while maintaining a traditional mutable Linux system.
 
-32 GB of SSD/HDD
+Instead of using technologies such as:
 
-Any Modern CPU (15+ years)
+- OverlayFS
+- OSTree
+- Read-only root filesystems
 
-4 GB of RAM.
+Arvor relies on:
 
-# Software Cujo Código é Aberto (SCCA) by NextFerret by The Arvor License v1.
-# FAQ:
+- LVM snapshots
+- Transactional package operations
+- Rollback support
+- Native Debian compatibility
 
-### Does This Distro Uses OverlayFS?
-No. In Fact we Actually Abomine using OverlayFS because of the historical LPEs Problem.
+The result is a system that remains familiar to Linux administrators while providing recovery from failed upgrades.
 
-### Does Arvor uses 100% python on their codebase?
-No. By the Release 2.1 We made Project Xesta,that turned the tools into C or C++
+---
 
-### Does Arvor Uses ostree?
+# Core Components
+
+| Component | Description |
+|----------|-------------|
+| **napt** | Transactional package manager compatible with APT workflows. |
+| **nsm** | Snapshot Manager responsible for creating, managing and restoring system snapshots. |
+| **nlc** | Lightweight chroot environment manager used internally by Arvor. |
+
+---
+
+# System Requirements
+
+Minimum requirements:
+
+- **CPU:** Any x86_64 processor from approximately the last 15 years
+- **Memory:** 4 GB RAM
+- **Storage:** 32 GB available disk space
+
+Recommended:
+
+- SSD
+- 8 GB RAM or more
+
+---
+
+# Architecture
+
+Arvor intentionally avoids technologies commonly used by immutable distributions.
+
+| Technology | Used |
+|-----------|------|
+| OverlayFS | ❌ |
+| OSTree | ❌ |
+| Read-only root filesystem | ❌ |
+| LVM Snapshots | ✅ |
+| Mutable root filesystem | ✅ |
+| Transactional updates | ✅ |
+
+---
+
+# Frequently Asked Questions
+
+## Does Arvor use OverlayFS?
+
 No.
 
-### What is nf-tree that google said? i did not see any nf-tree here!
-nf-tree was our snapshot manager based on BTRFS. We changed it to nsm in 2.1 because nf-tree had a patched-up structure and code.
+Arvor intentionally avoids OverlayFS due to its long history of privilege escalation vulnerabilities and because it does not fit the project's design goals.
+
+---
+
+## Does Arvor use OSTree?
+
+No.
+
+Arvor implements its own transactional update model.
+
+---
+
+## Is the system immutable?
+
+No.
+
+Arvor is fully mutable while still supporting atomic upgrades and rollbacks.
+
+---
+
+## Is Arvor written entirely in Python?
+
+No.
+
+Earlier releases relied heavily on Python.
+
+Beginning with **Arvor 2.1**, the **Project Xesta** initiative migrated most core utilities to **C and C++** to improve performance, reduce runtime dependencies and simplify distribution.
+
+---
+
+## What happened to NF-Tree?
+
+**NF-Tree** was Arvor's original snapshot manager based on Btrfs.
+
+During the development of Arvor 2.1, it was replaced by **NSM (NextFerret Snapshot Manager)** after a major redesign of the snapshot infrastructure.
+
+NSM provides a cleaner architecture and serves as the foundation for future releases.
+
+---
+
+# License
+
+**Software Cujo Código é Aberto (SCCA)**
+
+Copyright © NextFerret
+
+Licensed under the **Arvor License v1**.
