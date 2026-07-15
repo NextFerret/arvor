@@ -3,10 +3,6 @@
 # Arvor Linux : When Atomicity Meets Mutability.
 ARM Readme:https://github.com/NextFerret/arvor/blob/main/README-ARM.md
 
-## We Moved to XFS and LVM in the version 4.1.
-
-## Arvor Linux 4.1 Will recive an ARM Version called Armvor.
-
 **Arvor Linux** is a Debian-based Linux distribution designed to provide **atomic system updates without relying on an immutable root filesystem**.
 
 Unlike many modern atomic distributions, Arvor separates the concepts of **atomicity** and **immutability**. The project focuses on reliable, transactional upgrades while preserving a traditional, fully mutable Linux environment.
