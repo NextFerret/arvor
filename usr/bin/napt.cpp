@@ -461,23 +461,29 @@ bool ends_with(const string& value, const string& suffix) {
 
 class NaptAcquireStatus final : public pkgAcquireStatus {
     int fd;
+    bool show_host;
+    string label;
+    int last_shown = -1;
 public:
-    explicit NaptAcquireStatus(int fd_) : fd(fd_) {}
+    NaptAcquireStatus(int fd_, bool show_host_, string label_ = "packages")
+        : fd(fd_), show_host(show_host_), label(std::move(label_)) {}
     bool MediaChange(string, string) override { return false; }
     bool Pulse(pkgAcquire* owner) override {
         pkgAcquireStatus::Pulse(owner);
-        if (fd < 0) return true;
-        string line = "dlstatus:0:" + to_string(Percent) + ":Downloading\n";
-        ssize_t written = write(fd, line.c_str(), line.size());
-        (void)written;
+        int pct = static_cast<int>(Percent);
+        if (fd >= 0) {
+            string line = "dlstatus:0:" + to_string(Percent) + ":Downloading\n";
+            ssize_t written = write(fd, line.c_str(), line.size());
+            (void)written;
+        } else if (show_host && pct != last_shown) {
+            cout << "\rDownloading " << label << ": " << pct << "%   " << flush;
+            last_shown = pct;
+        }
         return true;
     }
-};
-
-class NaptHostProgress final : public APT::Progress::PackageManager {
-public:
-    bool StatusChanged(string, unsigned int, unsigned int, string) override {
-        return true;
+    void Stop() override {
+        pkgAcquireStatus::Stop();
+        if (fd < 0 && show_host) cout << "\n";
     }
 };
 
@@ -587,7 +593,17 @@ bool run_libapt_transaction(const string& action, const vector<string>& targets,
         return false;
     }
 
-    NaptAcquireStatus acquire_status(status_fd);
+    if (!quiet && status_fd < 0) {
+        unsigned long long need = fetcher.FetchNeeded();
+        if (need > 0) {
+            if (need < 1024 * 1024)
+                cout << "Downloading packages (" << (need / 1024) << " KB)...\n";
+            else
+                cout << "Downloading packages (" << (need / 1024 / 1024) << " MB)...\n";
+        }
+    }
+
+    NaptAcquireStatus acquire_status(status_fd, !quiet && status_fd < 0);
     fetcher.SetLog(&acquire_status);
     if (fetcher.Run() != pkgAcquire::Continue) {
         _error->DumpErrors();
@@ -597,15 +613,10 @@ bool run_libapt_transaction(const string& action, const vector<string>& targets,
     unique_ptr<APT::Progress::PackageManager> pm_progress;
     if (status_fd >= 0)
         pm_progress = make_unique<APT::Progress::PackageManagerProgressFd>(status_fd);
-    else if (!quiet)
-        pm_progress = make_unique<NaptHostProgress>();
     else
         pm_progress = make_unique<APT::Progress::PackageManager>();
 
     pkgPackageManager::OrderResult result = pm->DoInstall(pm_progress.get());
-    if (!quiet && status_fd < 0 && result == pkgPackageManager::Completed) {
-        cout << "Progress: 100%\n";
-    }
     if (result != pkgPackageManager::Completed) {
         _error->DumpErrors();
         return false;
@@ -1467,6 +1478,48 @@ void perform_upgrade_transaction(const vector<string>& pkgs, bool apply_host) {
     perform_install_transaction(pkgs, apply_host);
 }
 
+static string to_lower_copy(const string& s) {
+    string r = s;
+    transform(r.begin(), r.end(), r.begin(),
+              [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    return r;
+}
+
+int run_search(const vector<string>& terms) {
+    if (terms.empty()) { cout << "Usage: napt search <term>\n"; return 1; }
+    string term = to_lower_copy(terms[0]);
+
+    pkgCacheFile cache_file;
+    pkgCache* cache = cache_file.GetPkgCache();
+    if (cache == nullptr) { _error->DumpErrors(); return 1; }
+
+    pkgRecords recs(*cache);
+    int matches = 0;
+
+    for (pkgCache::PkgIterator pkg = cache->PkgBegin(); !pkg.end(); ++pkg) {
+        pkgCache::VerIterator ver = pkg.VersionList();
+        if (ver.end()) continue;
+
+        string short_desc;
+        pkgCache::DescIterator desc = ver.TranslatedDescription();
+        if (!desc.end()) {
+            pkgRecords::Parser& parser = recs.Lookup(desc.FileList());
+            short_desc = parser.ShortDesc();
+        }
+
+        string name = pkg.Name();
+        if (to_lower_copy(name).find(term) == string::npos &&
+            to_lower_copy(short_desc).find(term) == string::npos)
+            continue;
+
+        cout << name << " - " << short_desc << "\n";
+        ++matches;
+    }
+
+    if (matches == 0) cout << "No packages found matching \"" << terms[0] << "\".\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     pkgInitConfig(*_config);
     pkgInitSystem(*_config, _system);
@@ -1477,7 +1530,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
         if (arg == "-h") { show_help(); return 0; }
-        else if (arg == "--v") { cout << "napt 2.0\n"; return 0; }
+        else if (arg == "--v") { cout << "napt 3.0\n"; return 0; }
         else if (arg == "--vb") { _config->Set("Debug::pkgAcquire", "true"); }
         else if (arg == "--apply-host") { apply_host = true; }
         else if (command.empty() && arg[0] != '-') { command = arg; }
@@ -1493,7 +1546,7 @@ int main(int argc, char** argv) {
         pkgSourceList* src_list = cache_file.GetSourceList();
         bool apt_ok = false;
         if (src_list != nullptr) {
-            NaptAcquireStatus status(-1);
+            NaptAcquireStatus status(-1, true, "metadata");
             apt_ok = ListUpdate(status, *src_list);
             if (!apt_ok) _error->DumpErrors();
         } else {
