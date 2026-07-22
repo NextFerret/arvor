@@ -48,7 +48,8 @@ const string TREE_ROOT = "/nsm/napt/root";
 const string NF_TREE_BIN = "/usr/bin/nsm";
 const string AUTO_SNAP_DIR = "/nsm/snapshots/auto";
 const string NAPT_ETC_DIR = "/etc/napt";
-const string NAPT_SOURCES_PATH = "/etc/napt/sources.list";
+const string NAPT_SOURCES_FILE = "/etc/napt/sources.list";
+const string NAPT_SOURCES_DIR  = "/etc/napt/sources.list.d";
 const string NAPT_CACHE_DIR = "/etc/napt/cache";
 const string NAPT_ALLOWED_FILE = "/etc/napt/allowed";
 
@@ -87,7 +88,7 @@ struct InstallDecision {
     bool from_napt = false;
 };
 
-void perform_install_transaction(const vector<string>& pkgs, bool apply_host);
+void perform_install_transaction(const vector<string>& pkgs, bool apply_host, bool is_upgrade = false);
 bool run_libapt_transaction(const string& action, const vector<string>& targets, int status_fd, bool quiet);
 
 bool nf_tree_available() {
@@ -98,18 +99,22 @@ void show_help() {
     cout << "New Advanced Packaging Tool - napt 3.0\n\n"
          << "Usage: napt [command] [options]\n\n"
          << "Commands:\n"
-         << "  install          Installs packages or local .deb files in a chroot; applies to host only if successful.\n"
-         << "  remove           Removes packages in a chroot; applies to host only if successful.\n"
-         << "  sync             Updates repository metadata.\n"
-         << "  upgrade          Upgrades all packages, or selected packages, using the chroot-first method.\n"
-         << "  dist-upgrade     Full release upgrade\n"
-         << "  purge            Removes packages and their configuration files.\n"
-         << "  clean            Cleans the Napt download cache.\n\n"
+         << "  install          Install packages or local .deb files. Tested in a chroot before being applied to the host.\n"
+         << "  remove           Remove packages. Tested in a chroot before being applied to the host.\n"
+         << "  purge            Remove packages along with their configuration files.\n"
+         << "  upgrade          Upgrade all packages, or the specified packages.\n"
+         << "  dist-upgrade     Perform a full release upgrade.\n"
+         << "  search           Search available packages by name. Use -p <page> to paginate.\n"
+         << "  sync             Refresh repository metadata.\n"
+         << "  clean            Clear the Napt package cache.\n\n"
          << "Options:\n"
-         << "  --apply-host     Skip the chroot and apply changes directly to the host.\n"
+         << "  --apply-host     Skip the chroot test and apply changes directly to the host.\n"
+         << "  -p <page>        Show a specific page of search results (used with search).\n"
          << "  --v              Show version information.\n"
-         << "  --vb             Enable verbose logging for debugging libapt transactions.\n"
+         << "  --vb             Enable verbose logging for libapt transactions.\n"
          << "  -h               Show this help message.\n\n"
+         << "Napt repositories are configured in /etc/napt/sources.list (one per line)\n"
+         << "and/or as individual files under /etc/napt/sources.list.d/.\n\n"
          << "                 This napt Has Super Cow Powers.\n";
 }
 
@@ -276,9 +281,18 @@ void mount_fs() {
     exec_argv_devnull_out({"mount", "--bind", "/dev/pts",  TREE_ROOT + "/dev/pts"});
     exec_argv_devnull_out({"mount", "--bind", "/proc",     TREE_ROOT + "/proc"});
     exec_argv_devnull_out({"mount", "--bind", "/sys",      TREE_ROOT + "/sys"});
+
+    string resolv_target = TREE_ROOT + "/etc/resolv.conf";
+    if (!fs::exists("/etc/resolv.conf")) return;
+    error_code ec;
+    if (!fs::exists(resolv_target, ec)) {
+        ofstream touch(resolv_target);
+    }
+    exec_argv_devnull_out({"mount", "--bind", "/etc/resolv.conf", resolv_target});
 }
 
 void umount_fs() {
+    exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/etc/resolv.conf"});
     exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/dev/pts"});
     exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/dev"});
     exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/proc"});
@@ -339,7 +353,7 @@ bool manage_sandbox(const string& action) {
         exec_argv_devnull_out({"mkdir", "-p", "/nsm/napt"});
 
         if (root_dev.empty() || vg_name.empty()) {
-            cout << "Error: could not determine root LVM device or VG.\n";
+            cout << "E: Unable to determine the root LVM device or volume group.\n";
             return false;
         }
 
@@ -350,14 +364,14 @@ bool manage_sandbox(const string& action) {
         } else {
             double free_gb = get_vg_free_gb(vg_name);
             if (free_gb < 1.0) {
-                cout << "Error: not enough VG free space. Need 1GB, have " << free_gb << "GB.\n";
+                cout << "E: Insufficient free space in volume group: 1 GB required, " << free_gb << " GB available.\n";
                 return false;
             }
             rc = exec_argv_devnull_out({"lvcreate", "-L", "1G", "-s", "--name", snap_lv_name, root_dev});
         }
 
         if (rc != 0) {
-            cout << "Error: LVM snapshot of " << root_dev << " failed (rc=" << rc << ").\n";
+            cout << "E: LVM snapshot of " << root_dev << " failed (exit code " << rc << ").\n";
             return false;
         }
 
@@ -372,7 +386,7 @@ bool manage_sandbox(const string& action) {
         }
 
         if (!dev_ready) {
-            cout << "Error: snapshot device " << snap_dev << " never became available.\n";
+            cout << "E: Snapshot device " << snap_dev << " did not become available in time.\n";
             exec_argv_devnull_out({"lvremove", "-f", snap_dev});
             return false;
         }
@@ -390,14 +404,14 @@ bool manage_sandbox(const string& action) {
         }
 
         if (mount_rc != 0) {
-            cout << "Error: failed to mount snapshot to " << TREE_ROOT << " (rc=" << mount_rc << ").\n";
+            cout << "E: Unable to mount snapshot at " << TREE_ROOT << " (exit code " << mount_rc << ").\n";
             exec_argv_devnull_out({"lvremove", "-f", snap_dev});
             return false;
         }
 
         struct stat st;
         if (stat(TREE_ROOT.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
-            cout << "Error: chroot root " << TREE_ROOT << " was not created.\n";
+            cout << "E: Chroot root " << TREE_ROOT << " was not created.\n";
             return false;
         }
 
@@ -433,14 +447,14 @@ void do_rollback(const string& prefix) {
     if (!nf_tree_available()) return;
     string root_snap = get_latest_snapshot("root-auto-" + prefix);
     if (!root_snap.empty()) {
-        cout << "Rolling back root: " << root_snap << "\n";
+        cout << "Rolling back to snapshot: " << root_snap << "\n";
         exec_argv_devnull_out({NF_TREE_BIN, "rollback", root_snap});
     }
 }
 
 string fetch_url(const string& url) {
     if (url.empty()) return "";
-    return exec_argv_capture({"curl", "-fsSL", url});
+    return exec_argv_capture({"curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30", url});
 }
 
 string trim_copy(const string& s) {
@@ -669,11 +683,9 @@ void print_napt_repo_warning(const string& url) {
     static set<string> warned_repos;
     if (warned_repos.count(url)) return;
     warned_repos.insert(url);
-    cout << " You are installing packages from an unauthorized third-party napt repository:\n"
-         << " " << url << "\n"
-         << " These packages are UNVERIFIED and could contain MALWARE, RANSOMWARE, or\n"
-         << " utterly DESTROY your operating system.\n"
-         << " ONLY PROCEED IF YOU ABSOLUTELY TRUST THE SOURCE!\n";
+    cout << "W: Repository not authenticated: " << url << "\n"
+         << "W: Packages originating from this source are unverified and may pose a security risk.\n"
+         << "W: Proceed only if this repository is trusted.\n";
 }
 
 bool parse_napt_source_line(const string& raw_line, NaptSource& source) {
@@ -703,25 +715,25 @@ void load_napt_sources_from_file(const string& path, vector<NaptSource>& sources
 
 vector<NaptSource> load_napt_sources() {
     vector<NaptSource> sources;
-    if (path_is_regular_file(NAPT_SOURCES_PATH)) {
-        load_napt_sources_from_file(NAPT_SOURCES_PATH, sources);
-        return sources;
-    }
 
-    if (path_is_directory(NAPT_SOURCES_PATH)) {
-        DIR* dir = opendir(NAPT_SOURCES_PATH.c_str());
-        if (!dir) return sources;
-        vector<string> files;
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != NULL) {
-            string name = entry->d_name;
-            if (name == "." || name == "..") continue;
-            string path = NAPT_SOURCES_PATH + "/" + name;
-            if (path_is_regular_file(path)) files.push_back(path);
+    if (path_is_regular_file(NAPT_SOURCES_FILE))
+        load_napt_sources_from_file(NAPT_SOURCES_FILE, sources);
+
+    if (path_is_directory(NAPT_SOURCES_DIR)) {
+        DIR* dir = opendir(NAPT_SOURCES_DIR.c_str());
+        if (dir != nullptr) {
+            vector<string> files;
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                string name = entry->d_name;
+                if (name == "." || name == "..") continue;
+                string path = NAPT_SOURCES_DIR + "/" + name;
+                if (path_is_regular_file(path)) files.push_back(path);
+            }
+            closedir(dir);
+            sort(files.begin(), files.end());
+            for (const auto& path : files) load_napt_sources_from_file(path, sources);
         }
-        closedir(dir);
-        sort(files.begin(), files.end());
-        for (const auto& path : files) load_napt_sources_from_file(path, sources);
     }
 
     return sources;
@@ -859,9 +871,14 @@ bool clean_napt_cache() {
     return true;
 }
 
-void print_install_already_present_message(const string& pkg_name) {
-    cout << pkg_name << " is already installed. For upgrades, use napt upgrade "
-         << pkg_name << " or just napt upgrade. If it is a huge package, use --apply-host.\n";
+void print_install_already_present_message(const string& pkg_name, bool is_upgrade) {
+    if (is_upgrade) {
+        cout << pkg_name << " is already up to date.\n";
+        return;
+    }
+    cout << pkg_name << " is already installed. To upgrade it, run napt upgrade "
+         << pkg_name << ", or napt upgrade with no arguments to upgrade all packages.\n"
+         << "For large transactions, --apply-host skips the chroot verification step.\n";
 }
 
 vector<NaptRepoMetadata> load_cached_napt_metadata() {
@@ -965,9 +982,9 @@ string calculate_sha256(const string& file_path) {
     return trim_copy(out);
 }
 
-bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet) {
+bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet, bool is_upgrade = false) {
     if (pkgs.empty()) {
-        if (!quiet) cout << "No packages were specified.\n";
+        if (!quiet) cout << "E: No packages were specified.\n";
         return false;
     }
 
@@ -978,11 +995,11 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
     for (const auto& pkg_name : pkgs) {
         if (ends_with(pkg_name, ".deb")) {
             if (!path_is_regular_file(pkg_name)) {
-                if (!quiet) cout << "Local .deb file not found: " << pkg_name << "\n";
+                if (!quiet) cout << "E: Unable to locate local package file: " << pkg_name << ".\n";
                 had_error = true;
                 continue;
             }
-            if (!quiet) cout << "Installing local .deb: " << pkg_name << "\n";
+            if (!quiet) cout << "Selecting local package archive: " << pkg_name << ".\n";
             InstallDecision decision;
             decision.package_name     = pkg_name;
             decision.apt_argument     = pkg_name;
@@ -996,7 +1013,7 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
         NaptPackageCandidate napt_candidate = find_best_napt_candidate(repos, pkg_name);
 
         if (!apt_state.found && !napt_candidate.found) {
-            if (!quiet) cout << "Package " << pkg_name << " not found.\n";
+            if (!quiet) cout << "E: Unable to locate package " << pkg_name << ".\n";
             had_error = true;
             continue;
         }
@@ -1012,12 +1029,12 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
         if (use_napt) {
             print_napt_repo_warning(napt_candidate.base_url);
             if (apt_state.installed && compare_versions(apt_state.installed_version, napt_candidate.version) >= 0) {
-                if (!quiet) print_install_already_present_message(pkg_name);
+                if (!quiet) print_install_already_present_message(pkg_name, is_upgrade);
                 continue;
             }
             string local_path;
             if (!cache_napt_package(napt_candidate, local_path)) {
-                if (!quiet) cout << "Failed to download Napt package for " << pkg_name << ".\n";
+                if (!quiet) cout << "E: Failed to download " << pkg_name << " from the Napt repository.\n";
                 had_error = true;
                 continue;
             }
@@ -1025,10 +1042,10 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
                 string local_hash = calculate_sha256(local_path);
                 if (local_hash != napt_candidate.sha256) {
                     if (!quiet) {
-                        cout << "SHA256 checksum mismatch for " << pkg_name << ".\n"
-                             << "Expected: " << napt_candidate.sha256 << "\n"
-                             << "Got:      " << local_hash << "\n"
-                             << "Aborting installation of this package.\n";
+                        cout << "E: SHA256 checksum mismatch for " << pkg_name << ".\n"
+                             << "E: Expected: " << napt_candidate.sha256 << "\n"
+                             << "E: Got:      " << local_hash << "\n"
+                             << "E: Aborting installation of this package.\n";
                     }
                     had_error = true;
                     exec_argv_devnull_out({"rm", "-f", local_path});
@@ -1042,21 +1059,21 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
             decision.from_napt        = true;
             decisions.push_back(decision);
             if (!quiet) {
-                cout << "Using Napt package for " << pkg_name;
+                cout << "Selected " << pkg_name;
                 if (!napt_candidate.version.empty()) cout << " (" << napt_candidate.version << ")";
-                cout << ".\n";
+                cout << " from the Napt repository.\n";
             }
             continue;
         }
 
         if (!apt_state.found || apt_state.candidate_version.empty()) {
-            if (!quiet) cout << "Package " << pkg_name << " not found.\n";
+            if (!quiet) cout << "E: Unable to locate package " << pkg_name << ".\n";
             had_error = true;
             continue;
         }
 
         if (apt_state.installed && compare_versions(apt_state.installed_version, apt_state.candidate_version) >= 0) {
-            if (!quiet) print_install_already_present_message(pkg_name);
+            if (!quiet) print_install_already_present_message(pkg_name, is_upgrade);
             continue;
         }
 
@@ -1067,9 +1084,9 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
         decision.from_napt        = false;
         decisions.push_back(decision);
         if (!quiet) {
-            cout << "Using Debian package for " << pkg_name;
+            cout << "Selected " << pkg_name;
             if (!apt_state.candidate_version.empty()) cout << " (" << apt_state.candidate_version << ")";
-            cout << ".\n";
+            cout << " from the Debian archive.\n";
         }
     }
 
@@ -1120,26 +1137,6 @@ void do_nflinux_upgrade(bool apply_host) {
         perform_install_transaction(pkgs_to_install, apply_host);
     }
 #endif
-}
-
-static const int PROGRESS_BAR_WIDTH = 18;
-
-static string format_remaining(double seconds) {
-    int s = static_cast<int>(seconds);
-    if (s <= 0) return "0s";
-    if (s < 60) return to_string(s) + "s";
-    int m = s / 60, r = s % 60;
-    return to_string(m) + "m " + to_string(r) + "s";
-}
-
-static void render_chroot_bar(int filled, const string& time_str) {
-    string bar(filled, '#');
-    bar += string(PROGRESS_BAR_WIDTH - filled, ' ');
-    string line = "\rTesting on the chroot                        ["
-                  + bar + "] Estimated Time:" + time_str;
-    line += string(max(0, 20 - static_cast<int>(time_str.size())), ' ');
-    cout << line;
-    cout.flush();
 }
 
 void perform_transaction_argv(const string& action, const vector<string>& targets, bool apply_host) {
@@ -1208,8 +1205,9 @@ void perform_transaction_argv(const string& action, const vector<string>& target
             if (have_pipe) close(apt_pipe[1]);
             if (have_err)  close(err_pipe[1]);
 
-            std::atomic<double> apt_percent(0.0);
-            std::atomic<bool>   display_done(false);
+            cout << "Verifying transaction in an isolated chroot environment...\n";
+
+            std::atomic<int> apt_percent(-1);
             string child_stderr_output;
 
             std::thread stderr_reader([&]() {
@@ -1228,6 +1226,7 @@ void perform_transaction_argv(const string& action, const vector<string>& target
                 FILE* f = fdopen(apt_pipe[0], "r");
                 if (!f) { close(apt_pipe[0]); return; }
                 char line[512];
+                int last_shown = -1;
                 while (fgets(line, sizeof(line), f) != NULL) {
                     string s(line);
                     bool is_pm = (s.size() > 9 && s.substr(0, 9) == "pmstatus:");
@@ -1241,92 +1240,53 @@ void perform_transaction_argv(const string& action, const vector<string>& target
                     if (c3 == string::npos) continue;
                     string pct_str = s.substr(c2 + 1, c3 - c2 - 1);
                     try {
-                        double pct = stod(pct_str);
+                        int pct = static_cast<int>(stod(pct_str));
                         if (pct > apt_percent.load()) apt_percent.store(pct);
+                        int current = apt_percent.load();
+                        if (current != last_shown) {
+                            cout << "\rVerifying transaction in an isolated chroot environment: "
+                                 << current << "%   " << flush;
+                            last_shown = current;
+                        }
                     } catch (...) {}
                 }
                 fclose(f);
             });
 
-            std::thread display_thread([&]() {
-                auto start = std::chrono::steady_clock::now();
-                while (!display_done.load()) {
-                    double pct = apt_percent.load();
-                    auto now = std::chrono::steady_clock::now();
-                    double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0;
-                    int filled;
-                    string time_str;
-                    if (have_pipe) {
-                        filled = static_cast<int>((pct / 100.0) * PROGRESS_BAR_WIDTH);
-                        filled = min(filled, PROGRESS_BAR_WIDTH - 1);
-                        if (pct > 2.0 && elapsed > 1.0) {
-                            double remaining = elapsed * (100.0 - pct) / pct;
-                            time_str = format_remaining(remaining);
-                        } else {
-                            time_str = "estimating...";
-                        }
-                    } else {
-                        filled = min(PROGRESS_BAR_WIDTH - 1,
-                                     static_cast<int>(elapsed / 120.0 * PROGRESS_BAR_WIDTH));
-                        time_str = format_remaining(max(0.0, 120.0 - elapsed));
-                    }
-                    render_chroot_bar(filled, time_str);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                }
-            });
-
             int status = 0;
             bool waited = wait_for_child(pid, status);
 
-            display_done.store(true);
-            display_thread.join();
             reader_thread.join();
             stderr_reader.join();
-
-            int filled_final;
-            {
-                double pct = apt_percent.load();
-                filled_final = static_cast<int>((pct / 100.0) * PROGRESS_BAR_WIDTH);
-                filled_final = min(filled_final, PROGRESS_BAR_WIDTH - 1);
-            }
 
             umount_fs();
             manage_sandbox("delete");
 
-            auto print_bar = [&](const string& suffix) {
-                string bar(filled_final, '#');
-                bar += string(PROGRESS_BAR_WIDTH - filled_final, ' ');
-                cout << "\rTesting on the chroot                        ["
-                     << bar << "]                           " << suffix << "\n";
-            };
-
-            if (!waited) { print_bar("...  chroot test interrupted."); return; }
+            if (!waited) { cout << "\rE: Chroot verification interrupted.                        \n"; return; }
             if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                print_bar("...  chroot test failed.");
+                cout << "\rE: Chroot verification failed.                             \n";
                 if (!child_stderr_output.empty()) {
-                    cout << "\n--- chroot apt error ---\n" << child_stderr_output;
+                    cout << "---- chroot error output ----\n" << child_stderr_output;
                     if (child_stderr_output.back() != '\n') cout << '\n';
-                    cout << "------------------------\n";
+                    cout << "------------------------------\n";
                 }
                 return;
             }
 
-            cout << "\rTesting on the chroot                        ["
-                 << string(PROGRESS_BAR_WIDTH, '#') << "] Estimated Time:done          \n";
-            cout << "Chroot test successful. Applying to host...\n";
-            cout << "Do you want to apply the transaction to the host system?\n";
-            cout << "This action cannot be undone without rollback if it fails.\n";
-            cout << "Type 'yes' to confirm or anything else to abort: ";
+            cout << "\rChroot verification completed successfully.                \n";
+            cout << "The following transaction will now be applied to the host system.\n";
+            cout << "This operation is irreversible unless a rollback is performed.\n";
+            cout << "Do you wish to continue? Type 'yes' to confirm, or press Enter to abort: ";
             string confirm;
             getline(cin, confirm);
             if (confirm != "yes" && confirm != "YES") {
-                cout << "Transaction aborted by user.\n";
+                cout << "Transaction aborted.\n";
                 return;
             }
         } else {
             if (have_pipe) { close(apt_pipe[0]); close(apt_pipe[1]); }
             if (have_err)  { close(err_pipe[0]); close(err_pipe[1]); }
-            cout << "Fork failed for chroot test.\n";
+            cout << "E: Unable to fork process for chroot verification.\n";
             return;
         }
     }
@@ -1356,9 +1316,9 @@ void perform_transaction_argv(const string& action, const vector<string>& target
 
     if (host_ok) {
         create_snapshot("apt-post");
-        cout << "Transaction applied successfully.\n";
+        cout << "Transaction completed successfully.\n";
     } else {
-        cout << "Host transaction failed. Rolling back...\n";
+        cout << "E: Host transaction failed. Rolling back to the previous snapshot...\n";
         if (snapshot_created) do_rollback("apt-pre");
     }
 }
@@ -1370,9 +1330,9 @@ void perform_transaction(const string& action, const vector<string>& pkgs, bool 
     perform_transaction_argv(action, pkgs, apply_host);
 }
 
-void perform_install_transaction(const vector<string>& pkgs, bool apply_host) {
+void perform_install_transaction(const vector<string>& pkgs, bool apply_host, bool is_upgrade) {
     vector<InstallDecision> decisions;
-    if (!resolve_install_decisions(pkgs, decisions, false)) return;
+    if (!resolve_install_decisions(pkgs, decisions, false, is_upgrade)) return;
     if (decisions.empty()) return;
 
     vector<string> args;
@@ -1475,7 +1435,7 @@ void perform_global_upgrade(bool apply_host) {
 
 void perform_upgrade_transaction(const vector<string>& pkgs, bool apply_host) {
     if (pkgs.empty()) { perform_global_upgrade(apply_host); return; }
-    perform_install_transaction(pkgs, apply_host);
+    perform_install_transaction(pkgs, apply_host, true);
 }
 
 static string to_lower_copy(const string& s) {
@@ -1485,38 +1445,71 @@ static string to_lower_copy(const string& s) {
     return r;
 }
 
-int run_search(const vector<string>& terms) {
-    if (terms.empty()) { cout << "Usage: napt search <term>\n"; return 1; }
+int run_search(const vector<string>& terms, int page) {
+    if (terms.empty()) { cout << "Usage: napt search <term> [-p <page>]\n"; return 1; }
+    if (page < 1) page = 1;
     string term = to_lower_copy(terms[0]);
+    const int page_size = 30;
+    const int offset = (page - 1) * page_size;
 
     pkgCacheFile cache_file;
     pkgCache* cache = cache_file.GetPkgCache();
     if (cache == nullptr) { _error->DumpErrors(); return 1; }
 
-    pkgRecords recs(*cache);
     int matches = 0;
+    int shown = 0;
+    set<string> seen_names;
 
     for (pkgCache::PkgIterator pkg = cache->PkgBegin(); !pkg.end(); ++pkg) {
-        pkgCache::VerIterator ver = pkg.VersionList();
-        if (ver.end()) continue;
-
-        string short_desc;
-        pkgCache::DescIterator desc = ver.TranslatedDescription();
-        if (!desc.end()) {
-            pkgRecords::Parser& parser = recs.Lookup(desc.FileList());
-            short_desc = parser.ShortDesc();
-        }
-
         string name = pkg.Name();
-        if (to_lower_copy(name).find(term) == string::npos &&
-            to_lower_copy(short_desc).find(term) == string::npos)
-            continue;
+        if (to_lower_copy(name).find(term) == string::npos) continue;
+        if (!seen_names.insert(name).second) continue;
 
-        cout << name << " - " << short_desc << "\n";
+        int index = matches;
         ++matches;
+        if (index < offset || shown >= page_size) continue;
+
+        pkgCache::VerIterator ver = pkg.VersionList();
+        string version = ver.end() ? "" : ver.VerStr();
+
+        cout << name;
+        if (!version.empty()) cout << " (" << version << ")";
+        cout << "\n";
+        ++shown;
     }
 
-    if (matches == 0) cout << "No packages found matching \"" << terms[0] << "\".\n";
+    vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
+    for (const auto& repo : repos) {
+        for (const auto& entry : repo.packages) {
+            const string& pkg_name = entry.first;
+            if (to_lower_copy(pkg_name).find(term) == string::npos) continue;
+
+            int index = matches;
+            ++matches;
+            if (index < offset || shown >= page_size) continue;
+
+            string version = extract_napt_version(pkg_name, entry.second.first);
+            cout << pkg_name << " - Provided by Napt repository " << repo.base_url;
+            if (!version.empty()) cout << ", version " << version;
+            cout << ".\n";
+            ++shown;
+        }
+    }
+
+    if (matches == 0) {
+        cout << "No packages found matching \"" << terms[0] << "\".\n";
+        return 0;
+    }
+
+    if (shown == 0) {
+        cout << "Page " << page << " is empty. This search has " << matches << " results.\n";
+        return 0;
+    }
+
+    int total_pages = (matches + page_size - 1) / page_size;
+    cout << "Page " << page << " of " << total_pages << " (" << matches << " total results).";
+    if (page < total_pages) cout << " Use -p " << (page + 1) << " to see more.";
+    cout << "\n";
     return 0;
 }
 
@@ -1526,6 +1519,7 @@ int main(int argc, char** argv) {
     string command;
     vector<string> pkgs;
     bool apply_host = false;
+    int search_page = 1;
 
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
@@ -1533,6 +1527,7 @@ int main(int argc, char** argv) {
         else if (arg == "--v") { cout << "napt 3.0\n"; return 0; }
         else if (arg == "--vb") { _config->Set("Debug::pkgAcquire", "true"); }
         else if (arg == "--apply-host") { apply_host = true; }
+        else if (arg == "-p" && i + 1 < argc) { search_page = atoi(argv[++i]); }
         else if (command.empty() && arg[0] != '-') { command = arg; }
         else if (arg[0] != '-') { pkgs.push_back(arg); }
     }
@@ -1568,6 +1563,8 @@ int main(int argc, char** argv) {
         perform_upgrade_transaction(pkgs, apply_host);
     } else if (command == "remove" || command == "purge") {
         perform_transaction(command, pkgs, apply_host);
+    } else if (command == "search") {
+        return run_search(pkgs, search_page);
     } else {
         cout << "Unknown command: " << command << "\n";
         show_help();
