@@ -999,10 +999,15 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
                 had_error = true;
                 continue;
             }
-            if (!quiet) cout << "Selecting local package archive: " << pkg_name << ".\n";
+            error_code ec;
+            fs::path abs_path = fs::absolute(pkg_name, ec);
+            if (!ec) abs_path = fs::weakly_canonical(abs_path, ec);
+            string resolved_path = ec ? pkg_name : abs_path.string();
+
+            if (!quiet) cout << "Selecting local package archive: " << resolved_path << ".\n";
             InstallDecision decision;
-            decision.package_name     = pkg_name;
-            decision.apt_argument     = pkg_name;
+            decision.package_name     = resolved_path;
+            decision.apt_argument     = resolved_path;
             decision.selected_version = "";
             decision.from_napt        = false;
             decisions.push_back(decision);
@@ -1139,6 +1144,31 @@ void do_nflinux_upgrade(bool apply_host) {
 #endif
 }
 
+vector<string> bind_mount_local_deb_dirs(const vector<string>& targets) {
+    set<string> parents;
+    for (const auto& t : targets) {
+        if (!ends_with(t, ".deb")) continue;
+        fs::path parent = fs::path(t).parent_path();
+        if (!parent.empty()) parents.insert(parent.string());
+    }
+
+    vector<string> mounted;
+    for (const auto& parent : parents) {
+        string target = TREE_ROOT + parent;
+        error_code ec;
+        fs::create_directories(target, ec);
+        if (ec) continue;
+        exec_argv_devnull_out({"mount", "--bind", parent, target});
+        mounted.push_back(target);
+    }
+    return mounted;
+}
+
+void unbind_local_deb_dirs(const vector<string>& mounted) {
+    for (auto it = mounted.rbegin(); it != mounted.rend(); ++it)
+        exec_argv_devnull_out({"umount", "-l", *it});
+}
+
 void perform_transaction_argv(const string& action, const vector<string>& targets, bool apply_host) {
     if (!apply_host) {
         if (!manage_sandbox("create")) {
@@ -1146,6 +1176,7 @@ void perform_transaction_argv(const string& action, const vector<string>& target
             return;
         }
         mount_fs();
+        vector<string> local_deb_mounts = bind_mount_local_deb_dirs(targets);
 
         int apt_pipe[2]  = {-1, -1};
         bool have_pipe   = (pipe(apt_pipe) == 0);
@@ -1259,6 +1290,7 @@ void perform_transaction_argv(const string& action, const vector<string>& target
             reader_thread.join();
             stderr_reader.join();
 
+            unbind_local_deb_dirs(local_deb_mounts);
             umount_fs();
             manage_sandbox("delete");
 
