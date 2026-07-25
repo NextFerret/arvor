@@ -628,18 +628,41 @@ static void create_sparse_chroot(const Options *options, const char *target) {
     run_cmd(mkfs_cmd, "-F", img_path, NULL);
 
     {
-        char cmd[8192];
-        snprintf(cmd, sizeof(cmd), "losetup -f --show %s", img_path);
-        fp = popen(cmd, "r");
-    }
-    if (!fp) {
-        fail("Failed to set up loop device for %s", img_path);
+        int losetup_pipe[2];
+        if (pipe(losetup_pipe) != 0)
+            fail("Failed to create pipe for losetup");
+
+        pid_t lpid = fork();
+        if (lpid < 0) {
+            close(losetup_pipe[0]);
+            close(losetup_pipe[1]);
+            fail("Failed to fork for losetup");
+        }
+        if (lpid == 0) {
+            close(losetup_pipe[0]);
+            dup2(losetup_pipe[1], STDOUT_FILENO);
+            close(losetup_pipe[1]);
+            execlp("losetup", "losetup", "-f", "--show", img_path, NULL);
+            _exit(127);
+        }
+        close(losetup_pipe[1]);
+        fp = fdopen(losetup_pipe[0], "r");
+        if (!fp) {
+            close(losetup_pipe[0]);
+            fail("Failed to open pipe for losetup output");
+        }
+        int lstat;
+        waitpid(lpid, &lstat, 0);
+        if (!WIFEXITED(lstat) || WEXITSTATUS(lstat) != 0) {
+            fclose(fp);
+            fail("losetup failed on %s", img_path);
+        }
     }
     if (!fgets(loop_dev, sizeof(loop_dev), fp)) {
-        pclose(fp);
-        fail("Failed to read loop device name");
+        fclose(fp);
+        fail("Failed to read loop device name from losetup");
     }
-    pclose(fp);
+    fclose(fp);
 
     size_t len = strlen(loop_dev);
     while (len > 0 && (loop_dev[len - 1] == '\n' || loop_dev[len - 1] == '\r')) {
@@ -668,12 +691,24 @@ static void create_sparse_chroot(const Options *options, const char *target) {
     printf("Mount with:  mount -o loop %s %s\n", img_path, target);
 }
 
+static void validate_name(const char *name) {
+    if (!name || name[0] == '\0')
+        fail("Chroot name must not be empty");
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        fail("Invalid chroot name: '%s'", name);
+    for (const char *p = name; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '.')
+            fail("Chroot name contains invalid character '%c'. Only alphanumeric, '-', '_', '.' are allowed.", *p);
+    }
+}
+
 static void create_chroot(const Options *options) {
     char target[4096];
 
     if (!options->name) {
         fail("Missing chroot name");
     }
+    validate_name(options->name);
     if (!options->distro && !options->url) {
         fail("Use -d <distro> with -r <release>, or -u <archive-or-url>");
     }
@@ -715,7 +750,6 @@ static void enter_chroot(const Options *options) {
     char target[4096];
     char xauth[4096];
     char chroot_xauth[4096];
-    char inner[12288];
     char runtime_target[4096];
     const char *user = host_user();
     const char *home = host_home();
@@ -729,6 +763,7 @@ static void enter_chroot(const Options *options) {
     if (!options->name) {
         fail("Missing chroot name");
     }
+    validate_name(options->name);
 
     snprintf(target, sizeof(target), "%s/%s", BASE_DIR, options->name);
     if (!path_exists(target)) {
@@ -816,26 +851,40 @@ static void enter_chroot(const Options *options) {
         }
     }
 
-    snprintf(inner, sizeof(inner),
-             "export TERM=xterm; export DISPLAY='%s'; export XDG_RUNTIME_DIR=/tmp; "
-             "export WAYLAND_DISPLAY='%s'; export QT_QPA_PLATFORM=wayland; "
-             "export XAUTHORITY='/home/%s/.Xauthority'; %s",
-             display,
-             wayland ? wayland : "",
-             user,
-             options->exec_cmd ? options->exec_cmd : "/bin/bash");
+    char xauth_env[4096];
+    snprintf(xauth_env, sizeof(xauth_env), "/home/%s/.Xauthority", user);
 
     if (options->root) {
         pid = fork();
         if (pid == 0) {
-            execlp("chroot", "chroot", target, "/bin/bash", "-lc", inner, NULL);
+            setenv("TERM",              "xterm",                       1);
+            setenv("DISPLAY",           display,                       1);
+            setenv("XDG_RUNTIME_DIR",   "/tmp",                        1);
+            setenv("WAYLAND_DISPLAY",   wayland ? wayland : "",        1);
+            setenv("QT_QPA_PLATFORM",   "wayland",                     1);
+            setenv("XAUTHORITY",        xauth_env,                     1);
+            if (options->exec_cmd) {
+                execlp("chroot", "chroot", target, "/bin/sh", "-c", options->exec_cmd, NULL);
+            } else {
+                execlp("chroot", "chroot", target, "/bin/bash", "-l", NULL);
+            }
             _exit(127);
         }
         waitpid(pid, NULL, 0);
     } else {
         pid = fork();
         if (pid == 0) {
-            execlp("chroot", "chroot", target, "/bin/su", "-", user, "-c", inner, NULL);
+            setenv("TERM",              "xterm",                       1);
+            setenv("DISPLAY",           display,                       1);
+            setenv("XDG_RUNTIME_DIR",   "/tmp",                        1);
+            setenv("WAYLAND_DISPLAY",   wayland ? wayland : "",        1);
+            setenv("QT_QPA_PLATFORM",   "wayland",                     1);
+            setenv("XAUTHORITY",        xauth_env,                     1);
+            if (options->exec_cmd) {
+                execlp("chroot", "chroot", target, "/bin/su", "-", user, "-c", options->exec_cmd, NULL);
+            } else {
+                execlp("chroot", "chroot", target, "/bin/su", "-", user, NULL);
+            }
             _exit(127);
         }
         waitpid(pid, NULL, 0);
@@ -868,6 +917,7 @@ static void delete_chroot(const Options *options) {
     if (!options->name) {
         fail("Missing chroot name");
     }
+    validate_name(options->name);
 
     snprintf(target, sizeof(target), "%s/%s", BASE_DIR, options->name);
     if (!path_exists(target)) {

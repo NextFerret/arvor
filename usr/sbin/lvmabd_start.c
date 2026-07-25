@@ -477,8 +477,8 @@ int main(int argc, char **argv) {
     char dev[256], vg[256], lv[256];
     if (get_root_device(dev, sizeof(dev)) != 0) return 1;
     if (get_vg_lv(dev, vg, sizeof(vg), lv, sizeof(lv)) != 0) return 1;
+    clear_lvmabd_tags(vg, lv); // Clear active boot tags immediately on boot timer success
     if (refresh_snapshot(vg, lv) != 0) return 1;
-    clear_lvmabd_tags(vg, lv);
     ensure_installed_binary();
     install_systemd();
     install_initramfs();

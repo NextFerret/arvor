@@ -19,6 +19,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <apt-pkg/init.h>
 #include <apt-pkg/configuration.h>
 #include <apt-pkg/pkgsystem.h>
@@ -52,6 +53,61 @@ const string NAPT_SOURCES_FILE = "/etc/napt/sources.list";
 const string NAPT_SOURCES_DIR  = "/etc/napt/sources.list.d";
 const string NAPT_CACHE_DIR = "/etc/napt/cache";
 const string NAPT_ALLOWED_FILE = "/etc/napt/allowed";
+
+static bool assume_yes = false;
+static std::atomic<bool> sandbox_created_and_mounted(false);
+
+bool read_text_file(const string& path, string& content);
+bool write_text_file(const string& path, const string& content);
+
+struct ConfigBackup {
+    string os_release_orig;
+    string apt_sources_orig;
+    string napt_sources_orig;
+
+    string os_release_new;
+    string apt_sources_new;
+    string napt_sources_new;
+
+    bool backed_up = false;
+    bool has_new = false;
+
+    void backup() {
+        os_release_orig.clear();
+        apt_sources_orig.clear();
+        napt_sources_orig.clear();
+        read_text_file("/etc/os-release", os_release_orig);
+        read_text_file("/etc/apt/sources.list", apt_sources_orig);
+        read_text_file("/etc/napt/sources.list", napt_sources_orig);
+        backed_up = true;
+    }
+
+    void set_new(const string& os, const string& apt, const string& napt) {
+        os_release_new = os;
+        apt_sources_new = apt;
+        napt_sources_new = napt;
+        has_new = true;
+    }
+
+    void restore_orig() {
+        if (!backed_up) return;
+        if (!os_release_orig.empty()) write_text_file("/etc/os-release", os_release_orig);
+        else unlink("/etc/os-release");
+        if (!apt_sources_orig.empty()) write_text_file("/etc/apt/sources.list", apt_sources_orig);
+        else unlink("/etc/apt/sources.list");
+        if (!napt_sources_orig.empty()) write_text_file("/etc/napt/sources.list", napt_sources_orig);
+        else unlink("/etc/napt/sources.list");
+    }
+
+    void apply_new() {
+        if (!has_new) return;
+        if (!os_release_new.empty()) write_text_file("/etc/os-release", os_release_new);
+        if (!apt_sources_new.empty()) write_text_file("/etc/apt/sources.list", apt_sources_new);
+        if (!napt_sources_new.empty()) write_text_file("/etc/napt/sources.list", napt_sources_new);
+    }
+};
+
+static ConfigBackup global_config_backup;
 
 struct NaptSource {
     string base_url;
@@ -367,7 +423,12 @@ bool manage_sandbox(const string& action) {
                 cout << "E: Insufficient free space in volume group: 1 GB required, " << free_gb << " GB available.\n";
                 return false;
             }
-            rc = exec_argv_devnull_out({"lvcreate", "-L", "1G", "-s", "--name", snap_lv_name, root_dev});
+            string snap_size = "1G";
+            if (free_gb >= 10.0) snap_size = "5G";
+            else if (free_gb >= 5.0) snap_size = "3G";
+            else if (free_gb >= 2.0) snap_size = "1.5G";
+
+            rc = exec_argv_devnull_out({"lvcreate", "-L", snap_size, "-s", "--name", snap_lv_name, root_dev});
         }
 
         if (rc != 0) {
@@ -416,17 +477,58 @@ bool manage_sandbox(const string& action) {
         }
 
         exec_argv_devnull_out({"mkdir", "-p", TREE_ROOT + "/tmp"});
+        sandbox_created_and_mounted.store(true);
         return true;
 
     } else if (action == "delete") {
         umount_fs();
         exec_argv_devnull_out({"umount", "-l", TREE_ROOT});
         exec_argv_devnull_out({"lvremove", "-f", snap_dev});
+        sandbox_created_and_mounted.store(false);
         return true;
     }
 
     return false;
 }
+
+void cleanup_sandbox_on_exit() {
+    if (sandbox_created_and_mounted.load()) {
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/etc/resolv.conf"});
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/dev/pts"});
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/dev"});
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/proc"});
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/sys"});
+        exec_argv_devnull_out({"umount", "-l", TREE_ROOT});
+
+        string root_dev = get_root_device();
+        string vg_name = get_vg_name(root_dev);
+        if (!vg_name.empty()) {
+            string snap_dev = "/dev/" + vg_name + "/napt_sandbox_snap";
+            exec_argv_devnull_out({"lvremove", "-f", snap_dev});
+        }
+        sandbox_created_and_mounted.store(false);
+    }
+    global_config_backup.restore_orig();
+}
+
+void handle_termination_signal(int sig) {
+    (void)sig;
+    cleanup_sandbox_on_exit();
+    _exit(128 + sig);
+}
+
+void setup_safety_handlers() {
+    atexit(cleanup_sandbox_on_exit);
+    struct sigaction sa;
+    sa.sa_handler = handle_termination_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGQUIT, &sa, nullptr);
+    sigaction(SIGHUP, &sa, nullptr);
+}
+
 
 string get_latest_snapshot(const string& prefix) {
     DIR* dir = opendir(AUTO_SNAP_DIR.c_str());
@@ -1043,7 +1145,15 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
                 had_error = true;
                 continue;
             }
-            if (!napt_candidate.sha256.empty()) {
+            if (napt_candidate.sha256.empty()) {
+                if (!quiet) {
+                    cout << "E: SHA256 checksum is missing in metadata for package " << pkg_name << ".\n"
+                         << "E: Refusing to install unverified package.\n";
+                }
+                had_error = true;
+                exec_argv_devnull_out({"rm", "-f", local_path});
+                continue;
+            } else {
                 string local_hash = calculate_sha256(local_path);
                 if (local_hash != napt_candidate.sha256) {
                     if (!quiet) {
@@ -1101,15 +1211,14 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
 void do_nflinux_upgrade(bool apply_host) {
     (void)apply_host;
 #ifdef nflinux
-    string os_release = fetch_url("https://nextferret.github.io/etc/os-release");
-    if (!os_release.empty()) {
-        ofstream out("/etc/os-release");
-        out << os_release;
-        out.close();
-    }
+    global_config_backup.backup();
 
+    string os_release = fetch_url("https://nextferret.github.io/etc/os-release");
     string codenames = fetch_url("https://nextferret.github.io/version_codename");
     string repo_number_str = trim_copy(fetch_url("https://nextferret.github.io/repo-number"));
+    string napt_sources = "";
+    string apt_sources = "";
+
     if (!codenames.empty() && !repo_number_str.empty()) {
         size_t comma = codenames.find(',');
         if (comma != string::npos) {
@@ -1118,14 +1227,17 @@ void do_nflinux_upgrade(bool apply_host) {
             string base_repo_url = "https://nextferretdur.github.io/repo-nflinux-" + repo_number_str;
             string meta_url = base_repo_url + "/releases/" + napt_code + "/repo-metadata";
             if (!fetch_url(meta_url).empty()) {
-                exec_argv_devnull_out({"rm", "-f", "/etc/napt/sources.list"});
-                write_text_file("/etc/napt/sources.list", "deb " + base_repo_url + " " + napt_code + "\n");
-                string apt_sources = "deb http://deb.debian.org/debian " + debian_code + " main contrib non-free non-free-firmware\n";
+                napt_sources = "deb " + base_repo_url + " " + napt_code + "\n";
+                apt_sources = "deb http://deb.debian.org/debian " + debian_code + " main contrib non-free non-free-firmware\n";
                 apt_sources += "deb http://deb.debian.org/debian-security " + debian_code + "-security main contrib non-free non-free-firmware\n";
                 apt_sources += "deb http://deb.debian.org/debian " + debian_code + "-updates main contrib non-free non-free-firmware\n";
-                write_text_file("/etc/apt/sources.list", apt_sources);
             }
         }
+    }
+
+    if (!os_release.empty() || !apt_sources.empty() || !napt_sources.empty()) {
+        global_config_backup.set_new(os_release, apt_sources, napt_sources);
+        global_config_backup.apply_new();
     }
 
     vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
@@ -1294,8 +1406,13 @@ void perform_transaction_argv(const string& action, const vector<string>& target
             umount_fs();
             manage_sandbox("delete");
 
-            if (!waited) { cout << "\rE: Chroot verification interrupted.                        \n"; return; }
+            if (!waited) {
+                global_config_backup.restore_orig();
+                cout << "\rE: Chroot verification interrupted.                        \n";
+                return;
+            }
             if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                global_config_backup.restore_orig();
                 cout << "\rE: Chroot verification failed.                             \n";
                 if (!child_stderr_output.empty()) {
                     cout << "---- chroot error output ----\n" << child_stderr_output;
@@ -1305,15 +1422,18 @@ void perform_transaction_argv(const string& action, const vector<string>& target
                 return;
             }
 
-            cout << "\rChroot verification completed successfully.                \n";
-            cout << "The following transaction will now be applied to the host system.\n";
-            cout << "This operation is irreversible unless a rollback is performed.\n";
-            cout << "Do you wish to continue? Type 'yes' to confirm, or press Enter to abort: ";
-            string confirm;
-            getline(cin, confirm);
-            if (confirm != "yes" && confirm != "YES") {
-                cout << "Transaction aborted.\n";
-                return;
+            if (!assume_yes) {
+                cout << "\rChroot verification completed successfully.                \n";
+                cout << "The following transaction will now be applied to the host system.\n";
+                cout << "This operation is irreversible unless a rollback is performed.\n";
+                cout << "Do you wish to continue? Type 'yes' to confirm, or press Enter to abort: ";
+                string confirm;
+                getline(cin, confirm);
+                if (confirm != "yes" && confirm != "YES") {
+                    global_config_backup.restore_orig();
+                    cout << "Transaction aborted.\n";
+                    return;
+                }
             }
         } else {
             if (have_pipe) { close(apt_pipe[0]); close(apt_pipe[1]); }
@@ -1323,7 +1443,9 @@ void perform_transaction_argv(const string& action, const vector<string>& target
         }
     }
 
+    global_config_backup.restore_orig();
     bool snapshot_created = create_snapshot("apt-pre");
+    global_config_backup.apply_new();
 
     cout.flush();
     cerr.flush();
@@ -1351,6 +1473,7 @@ void perform_transaction_argv(const string& action, const vector<string>& target
         cout << "Transaction completed successfully.\n";
     } else {
         cout << "E: Host transaction failed. Rolling back to the previous snapshot...\n";
+        global_config_backup.restore_orig();
         if (snapshot_created) do_rollback("apt-pre");
     }
 }
@@ -1392,7 +1515,11 @@ void perform_global_upgrade(bool apply_host) {
         if (!installed_version.empty() && compare_versions(candidate.version, installed_version) <= 0) return;
         string local_path;
         if (!cache_napt_package(candidate, local_path)) return;
-        if (!candidate.sha256.empty()) {
+        if (candidate.sha256.empty()) {
+            exec_argv_devnull_out({"rm", "-f", local_path});
+            cout << "No SHA256 checksum found in metadata for " << pkg_name << ", skipping.\n";
+            return;
+        } else {
             string h = calculate_sha256(local_path);
             if (h != candidate.sha256) {
                 exec_argv_devnull_out({"rm", "-f", local_path});
@@ -1546,6 +1673,7 @@ int run_search(const vector<string>& terms, int page) {
 }
 
 int main(int argc, char** argv) {
+    setup_safety_handlers();
     pkgInitConfig(*_config);
     pkgInitSystem(*_config, _system);
     string command;
@@ -1559,6 +1687,7 @@ int main(int argc, char** argv) {
         else if (arg == "--v") { cout << "napt 3.0\n"; return 0; }
         else if (arg == "--vb") { _config->Set("Debug::pkgAcquire", "true"); }
         else if (arg == "--apply-host") { apply_host = true; }
+        else if (arg == "-y" || arg == "--yes" || arg == "--assume-yes") { assume_yes = true; }
         else if (arg == "-p" && i + 1 < argc) { search_page = atoi(argv[++i]); }
         else if (command.empty() && arg[0] != '-') { command = arg; }
         else if (arg[0] != '-') { pkgs.push_back(arg); }
