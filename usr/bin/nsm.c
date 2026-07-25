@@ -211,6 +211,18 @@ static bool resolve_lvm_info(const char *source, LvmInfo *info)
     return true;
 }
 
+static double get_vg_free_gb(const char *vg)
+{
+    char out[256];
+    char *argv[] = {"vgs", "-o", "vg_free", "--noheadings", "--units", "g", (char *)vg, NULL};
+    if (exec_capture(argv, out, sizeof(out)) != 0) return 0.0;
+    trim(out);
+    double val = 0.0;
+    sscanf(out, "%lf", &val);
+    return val;
+}
+
+
 static bool snapshot_mount_fstype(const char *mountpoint)
 {
     char fstype[64];
@@ -366,8 +378,19 @@ static bool create_snapshot(const char *mountpoint, const char *prefix,
     if (info.is_thin) {
         r = run_args("lvcreate", "-s", "-n", snapname, info.lvpath, NULL);
     } else {
-        r = run_args("lvcreate", "-s", "-n", snapname,
-                     "-l", "50%ORIGIN", info.lvpath, NULL);
+        double free_gb = get_vg_free_gb(info.vg);
+        if (free_gb < 1.0) {
+            printf("Error: Insufficient free space in volume group %s (1.0G required, %.2fG available).\n", info.vg, free_gb);
+            if (frozen) unfreeze_mount(mountpoint);
+            remove_snapshot_meta(snapdir);
+            return false;
+        }
+        const char *snap_size = "1G";
+        if (free_gb >= 10.0) snap_size = "5G";
+        else if (free_gb >= 5.0) snap_size = "3G";
+        else if (free_gb >= 2.0) snap_size = "1.5G";
+
+        r = run_args("lvcreate", "-L", snap_size, "-s", "-n", snapname, info.lvpath, NULL);
     }
 
     if (frozen) unfreeze_mount(mountpoint);

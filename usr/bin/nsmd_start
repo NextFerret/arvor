@@ -198,15 +198,19 @@ bool read_memory_state(double* free_ram_percent, double* swap_usage_percent) {
     unsigned long long mem_free = 0;
     unsigned long long swap_total = 0;
     unsigned long long swap_free = 0;
-    char key[64];
-    unsigned long long value = 0;
-    char unit[32];
-    while (fscanf(file, "%63s %llu %31s", key, &value, unit) == 3) {
-        if (strcmp(key, "MemTotal:") == 0) mem_total = value;
-        else if (strcmp(key, "MemAvailable:") == 0) mem_available = value;
-        else if (strcmp(key, "MemFree:") == 0) mem_free = value;
-        else if (strcmp(key, "SwapTotal:") == 0) swap_total = value;
-        else if (strcmp(key, "SwapFree:") == 0) swap_free = value;
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        char key[64];
+        unsigned long long value = 0;
+        char unit[32];
+        int parsed = sscanf(line, "%63s %llu %31s", key, &value, unit);
+        if (parsed >= 2) {
+            if (strcmp(key, "MemTotal:") == 0) mem_total = value;
+            else if (strcmp(key, "MemAvailable:") == 0) mem_available = value;
+            else if (strcmp(key, "MemFree:") == 0) mem_free = value;
+            else if (strcmp(key, "SwapTotal:") == 0) swap_total = value;
+            else if (strcmp(key, "SwapFree:") == 0) swap_free = value;
+        }
     }
     fclose(file);
     if (mem_available == 0) mem_available = mem_free;
