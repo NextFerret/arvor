@@ -2,12 +2,10 @@
 
 import os
 import sys
-import shlex
 import subprocess
 import json
 import shutil
 import socket
-import tempfile
 import urllib.request
 import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -166,23 +164,9 @@ class Sys:
     @staticmethod
     def run(cmd, input_text=None, check=True):
         try:
-            args = shlex.split(cmd) if isinstance(cmd, str) else cmd
-            r = subprocess.run(args, shell=False, check=check, text=True,
-                               input=input_text,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            r = subprocess.run(cmd, shell=True, check=check, text=True, input=input_text, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return r.stdout.strip()
-        except Exception:
-            return None
-
-    @staticmethod
-    def run_args(args, input_text=None, check=False):
-        try:
-            r = subprocess.run(args, shell=False, check=check, text=True,
-                               input=input_text,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return r.stdout.strip()
-        except Exception:
-            return None
+        except: return None
 
     @staticmethod
     def list_disks():
@@ -196,7 +180,7 @@ class Sys:
     @staticmethod
     def get_uuid(dev):
         if SIMULATE and "sda" in dev: return f"UUID-for-{dev}"
-        return Sys.run_args(["blkid", "-s", "UUID", "-o", "value", dev])
+        return Sys.run(f"blkid -s UUID -o value {dev}")
 
     @staticmethod
     def list_locales():
@@ -404,17 +388,6 @@ class InstallWorker(QThread):
         luks_sh = f"echo '{self.mapper} {f_p3} none luks,discard,initramfs' > /etc/crypttab\napt-get install -y cryptsetup-initramfs\n" if self.conf["luks"] else ""
         de_sh = f"apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold {self.conf['de_pkgs']}\n" if self.conf["de_pkgs"] else ""
 
-        creds_path = os.path.join(self.mount, "tmp", ".creds")
-        try:
-            with open(creds_path, "w") as cf:
-                cf.write(f"{self.conf['user']}:{self.conf['pass']}\n")
-                cf.write(f"root:{self.conf['pass']}\n")
-            os.chmod(creds_path, 0o600)
-        except Exception as e:
-            self.log_msg.emit(f"ERROR writing credentials file: {e}")
-            self.finished.emit(False)
-            return
-
         fstab_sh = f"""
 cat << EOF > /etc/fstab
 {f_root} /               xfs     defaults        0       0
@@ -479,8 +452,8 @@ systemctl enable NetworkManager
 
 userdel -r live 2>/dev/null || true
 useradd -m -s /bin/bash -G sudo {self.conf['user']}
-chpasswd < /tmp/.creds
-shred -u /tmp/.creds 2>/dev/null || rm -f /tmp/.creds
+echo "{self.conf['user']}:{self.conf['pass']}" | chpasswd
+echo "root:{self.conf['pass']}" | chpasswd
 echo "{self.conf['hostname']}" > /etc/hostname
 echo "127.0.0.1    localhost" > /etc/hosts
 echo "::1          localhost ip6-localhost ip6-loopback" >> /etc/hosts
