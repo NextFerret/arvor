@@ -66,9 +66,31 @@ The result is a system that remains familiar to Linux administrators while provi
 
 | Component | Description |
 |----------|-------------|
-| **napt** | Transactional package manager compatible with APT workflows. |
+| **napt** | Transactional package manager compatible with APT workflows (featuring multithreaded downloads and `autoclean`). |
 | **nsm** | Snapshot Manager responsible for creating, managing and restoring system snapshots. |
 | **nlc** | Lightweight chroot environment manager used internally by Arvor. |
+
+---
+
+# Package Manager (`napt`)
+
+`napt` is Armvor's C++ transactional package manager with built-in multi-threading and security hardening.
+
+### Key Features
+- **Parallel Downloads**: Multi-threaded metadata sync and `.deb` batch downloading.
+- **Smart Cache Cleanup (`autoclean`)**: Purges stale packages from `/etc/napt/cache` while retaining active ones:
+  ```bash
+  napt autoclean
+  ```
+- **Security & Integrity**: Strict SHA256 checksum enforcement, path traversal protection, and cURL option injection mitigation.
+- **Real-Time Size Feedback**: Displays file sizes dynamically in KB and MB.
+
+### Common Commands
+- `napt sync` - Refresh repository metadata concurrently.
+- `napt install <pkg>` - Install packages (chroot-verified before host application).
+- `napt upgrade` - Upgrade installed packages.
+- `napt clean` - Clear the entire package cache.
+- `napt autoclean` - Remove obsolete cached package files and free disk space.
 
 ---
 

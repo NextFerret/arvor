@@ -41,7 +41,7 @@ static void fail(const char *fmt, ...) {
 
 static char *dup_string(const char *value) {
     size_t len = strlen(value) + 1;
-    char *copy = malloc(len);
+    char *copy = (char *)malloc(len);
     if (!copy) {
         fail("Out of memory");
     }

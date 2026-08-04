@@ -20,6 +20,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <mutex>
+#include <future>
 #include <apt-pkg/init.h>
 #include <apt-pkg/configuration.h>
 #include <apt-pkg/pkgsystem.h>
@@ -162,7 +164,8 @@ void show_help() {
          << "  dist-upgrade     Perform a full release upgrade.\n"
          << "  search           Search available packages by name. Use -p <page> to paginate.\n"
          << "  sync             Refresh repository metadata.\n"
-         << "  clean            Clear the Napt package cache.\n\n"
+         << "  clean            Clear the Napt package cache.\n"
+         << "  autoclean        Clear obsolete packages from the Napt download cache.\n\n"
          << "Options:\n"
          << "  --apply-host     Skip the chroot test and apply changes directly to the host.\n"
          << "  -p <page>        Show a specific page of search results (used with search).\n"
@@ -554,9 +557,36 @@ void do_rollback(const string& prefix) {
     }
 }
 
+static std::mutex g_cout_mutex;
+
+string format_bytes(uint64_t bytes);
+
+template<typename... Args>
+void safe_log(Args&&... args) {
+    std::lock_guard<std::mutex> lock(g_cout_mutex);
+    (std::cout << ... << std::forward<Args>(args));
+    std::cout << std::flush;
+}
+
+string sanitize_filename(const string& raw) {
+    size_t pos_slash = raw.find_last_of('/');
+    string base = (pos_slash == string::npos) ? raw : raw.substr(pos_slash + 1);
+    size_t start = base.find_first_not_of(" \n\r\t");
+    string cleaned = (start == string::npos) ? "" : base.substr(start, base.find_last_not_of(" \n\r\t") - start + 1);
+    while (!cleaned.empty() && cleaned.front() == '-') cleaned.erase(cleaned.begin());
+    size_t pos;
+    while ((pos = cleaned.find("..")) != string::npos) {
+        cleaned.erase(pos, 2);
+    }
+    return cleaned.empty() ? "safe_file" : cleaned;
+}
+
 string fetch_url(const string& url) {
     if (url.empty()) return "";
-    return exec_argv_capture({"curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30", url});
+    size_t start = url.find_first_not_of(" \n\r\t");
+    string norm_url = (start == string::npos) ? "" : url.substr(start, url.find_last_not_of(" \n\r\t") - start + 1);
+    if (norm_url.front() == '-') return "";
+    return exec_argv_capture({"curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30", "--", norm_url});
 }
 
 string trim_copy(const string& s) {
@@ -908,29 +938,37 @@ bool sync_napt_metadata() {
 
     exec_argv_devnull_out({"mkdir", "-p", NAPT_ETC_DIR});
 
-    bool ok = true;
+    vector<future<bool>> futures;
+    futures.reserve(sources.size());
+
     for (const auto& source : sources) {
-        print_napt_repo_warning(source.base_url);
-        string url = source.base_url + "/releases/" + source.release + "/repo-metadata";
-        string metadata = fetch_url(url);
-        if (metadata.empty()) {
-            cout << "Failed to fetch metadata: " << url << "\n";
-            ok = false;
-            continue;
-        }
-        string release_dir = NAPT_ETC_DIR + "/" + source.release;
-        if (exec_argv_devnull_out({"mkdir", "-p", release_dir}) != 0) {
-            cout << "Failed to create metadata directory: " << release_dir << "\n";
-            ok = false;
-            continue;
-        }
-        string output_path = release_dir + "/repo-metadata";
-        if (!write_text_file(output_path, metadata)) {
-            cout << "Failed to write metadata: " << output_path << "\n";
-            ok = false;
-            continue;
-        }
-        cout << "Synced metadata for " << source.release << " from " << source.base_url << "\n";
+        futures.push_back(std::async(std::launch::async, [source]() -> bool {
+            print_napt_repo_warning(source.base_url);
+            string url = source.base_url + "/releases/" + source.release + "/repo-metadata";
+            string metadata = fetch_url(url);
+            if (metadata.empty()) {
+                safe_log("Failed to fetch metadata: ", url, "\n");
+                return false;
+            }
+            string safe_release = sanitize_filename(source.release);
+            string release_dir = NAPT_ETC_DIR + "/" + safe_release;
+            if (exec_argv_devnull_out({"mkdir", "-p", release_dir}) != 0) {
+                safe_log("Failed to create metadata directory: ", release_dir, "\n");
+                return false;
+            }
+            string output_path = release_dir + "/repo-metadata";
+            if (!write_text_file(output_path, metadata)) {
+                safe_log("Failed to write metadata: ", output_path, "\n");
+                return false;
+            }
+            safe_log("Synced metadata for ", source.release, " (", format_bytes(metadata.size()), ") from ", source.base_url, "\n");
+            return true;
+        }));
+    }
+
+    bool ok = true;
+    for (auto& fut : futures) {
+        if (!fut.get()) ok = false;
     }
     return ok;
 }
@@ -970,6 +1008,71 @@ bool clean_napt_cache() {
     else
         cout << "Cache is already clean.\n";
 
+    return true;
+}
+
+string format_bytes(uint64_t bytes) {
+    if (bytes < 1024) return to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) {
+        double kb = static_cast<double>(bytes) / 1024.0;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f KB", kb);
+        return string(buf);
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+        double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f MB", mb);
+        return string(buf);
+    }
+    double gb = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f GB", gb);
+    return string(buf);
+}
+
+vector<NaptRepoMetadata> load_cached_napt_metadata();
+
+bool autoclean_napt_cache() {
+    error_code ec;
+    if (!fs::exists(NAPT_CACHE_DIR, ec)) {
+        cout << "Cache directory does not exist: " << NAPT_CACHE_DIR << "\n";
+        return true;
+    }
+
+    vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
+    set<string> valid_filenames;
+    for (const auto& repo : repos) {
+        for (const auto& entry : repo.packages) {
+            valid_filenames.insert(path_basename(entry.second.first));
+        }
+    }
+
+    bool removed_any = false;
+    uint64_t bytes_freed = 0;
+
+    for (const auto& rel_entry : fs::directory_iterator(NAPT_CACHE_DIR, ec)) {
+        if (!rel_entry.is_directory()) continue;
+        for (const auto& file_entry : fs::directory_iterator(rel_entry.path(), ec)) {
+            if (!file_entry.is_regular_file()) continue;
+            string filename = file_entry.path().filename().string();
+            if (valid_filenames.find(filename) == valid_filenames.end()) {
+                uint64_t sz = file_entry.file_size(ec);
+                if (!ec) bytes_freed += sz;
+                fs::remove(file_entry.path(), ec);
+                if (!ec) {
+                    cout << "Autoclean removed stale package: " << filename << "\n";
+                    removed_any = true;
+                }
+            }
+        }
+    }
+
+    if (removed_any) {
+        cout << "Autoclean finished. Space freed: " << format_bytes(bytes_freed) << "\n";
+    } else {
+        cout << "Cache is already clean. No obsolete packages found.\n";
+    }
     return true;
 }
 
@@ -1070,11 +1173,14 @@ string build_napt_download_url(const NaptPackageCandidate& candidate) {
 }
 
 bool cache_napt_package(const NaptPackageCandidate& candidate, string& local_path) {
-    string release_dir = NAPT_CACHE_DIR + "/" + candidate.release;
+    string safe_release = sanitize_filename(candidate.release);
+    string safe_file = sanitize_filename(candidate.file_name);
+    string release_dir = NAPT_CACHE_DIR + "/" + safe_release;
     if (exec_argv_devnull_out({"mkdir", "-p", release_dir}) != 0) return false;
-    local_path = release_dir + "/" + path_basename(candidate.file_name);
+    local_path = release_dir + "/" + safe_file;
     string url = build_napt_download_url(candidate);
-    return exec_argv_devnull_out({"curl", "-fsSL", "-o", local_path, url}) == 0;
+    if (url.empty() || url.front() == '-') return false;
+    return exec_argv_devnull_out({"curl", "-fsSL", "-o", local_path, "--", url}) == 0;
 }
 
 string calculate_sha256(const string& file_path) {
@@ -1083,6 +1189,14 @@ string calculate_sha256(const string& file_path) {
     if (space_pos != string::npos) return out.substr(0, space_pos);
     return trim_copy(out);
 }
+
+struct PendingNaptDownload {
+    string pkg_name;
+    NaptPackageCandidate candidate;
+    string local_path;
+    bool success = false;
+    string error_msg;
+};
 
 bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet, bool is_upgrade = false) {
     if (pkgs.empty()) {
@@ -1093,6 +1207,7 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
     pkgCacheFile cache_file;
     vector<NaptRepoMetadata> repos = load_cached_napt_metadata();
     bool had_error = false;
+    vector<PendingNaptDownload> pending_napt_downloads;
 
     for (const auto& pkg_name : pkgs) {
         if (ends_with(pkg_name, ".deb")) {
@@ -1139,45 +1254,7 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
                 if (!quiet) print_install_already_present_message(pkg_name, is_upgrade);
                 continue;
             }
-            string local_path;
-            if (!cache_napt_package(napt_candidate, local_path)) {
-                if (!quiet) cout << "E: Failed to download " << pkg_name << " from the Napt repository.\n";
-                had_error = true;
-                continue;
-            }
-            if (napt_candidate.sha256.empty()) {
-                if (!quiet) {
-                    cout << "E: SHA256 checksum is missing in metadata for package " << pkg_name << ".\n"
-                         << "E: Refusing to install unverified package.\n";
-                }
-                had_error = true;
-                exec_argv_devnull_out({"rm", "-f", local_path});
-                continue;
-            } else {
-                string local_hash = calculate_sha256(local_path);
-                if (local_hash != napt_candidate.sha256) {
-                    if (!quiet) {
-                        cout << "E: SHA256 checksum mismatch for " << pkg_name << ".\n"
-                             << "E: Expected: " << napt_candidate.sha256 << "\n"
-                             << "E: Got:      " << local_hash << "\n"
-                             << "E: Aborting installation of this package.\n";
-                    }
-                    had_error = true;
-                    exec_argv_devnull_out({"rm", "-f", local_path});
-                    continue;
-                }
-            }
-            InstallDecision decision;
-            decision.package_name     = pkg_name;
-            decision.apt_argument     = local_path;
-            decision.selected_version = napt_candidate.version;
-            decision.from_napt        = true;
-            decisions.push_back(decision);
-            if (!quiet) {
-                cout << "Selected " << pkg_name;
-                if (!napt_candidate.version.empty()) cout << " (" << napt_candidate.version << ")";
-                cout << " from the Napt repository.\n";
-            }
+            pending_napt_downloads.push_back({pkg_name, napt_candidate, "", false, ""});
             continue;
         }
 
@@ -1202,6 +1279,71 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
             cout << "Selected " << pkg_name;
             if (!apt_state.candidate_version.empty()) cout << " (" << apt_state.candidate_version << ")";
             cout << " from the Debian archive.\n";
+        }
+    }
+
+    if (!pending_napt_downloads.empty()) {
+        size_t num_threads = std::min<size_t>(4, pending_napt_downloads.size());
+        vector<thread> workers;
+        std::atomic<size_t> current_index(0);
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    size_t idx = current_index.fetch_add(1);
+                    if (idx >= pending_napt_downloads.size()) break;
+
+                    auto& pending = pending_napt_downloads[idx];
+                    if (!quiet) safe_log("Downloading Napt package: ", pending.pkg_name, "...\n");
+
+                    if (!cache_napt_package(pending.candidate, pending.local_path)) {
+                        pending.error_msg = "E: Failed to download " + pending.pkg_name + " from the Napt repository.";
+                        continue;
+                    }
+
+                    if (pending.candidate.sha256.empty()) {
+                        pending.error_msg = "E: SHA256 checksum is missing in metadata for package " + pending.pkg_name + ".\nE: Refusing to install unverified package.";
+                        exec_argv_devnull_out({"rm", "-f", pending.local_path});
+                        continue;
+                    }
+
+                    string local_hash = calculate_sha256(pending.local_path);
+                    if (local_hash != pending.candidate.sha256) {
+                        pending.error_msg = "E: SHA256 checksum mismatch for " + pending.pkg_name + ".\nE: Expected: " + pending.candidate.sha256 + "\nE: Got:      " + local_hash + "\nE: Aborting installation of this package.";
+                        exec_argv_devnull_out({"rm", "-f", pending.local_path});
+                        continue;
+                    }
+
+                    error_code ec;
+                    uint64_t file_sz = fs::file_size(pending.local_path, ec);
+                    string sz_str = (!ec && file_sz > 0) ? (" [" + format_bytes(file_sz) + "]") : "";
+
+                    if (!quiet) safe_log("Downloaded ", pending.pkg_name, sz_str, " [OK]\n");
+                    pending.success = true;
+                }
+            });
+        }
+
+        for (auto& w : workers) {
+            if (w.joinable()) w.join();
+        }
+
+        for (const auto& pending : pending_napt_downloads) {
+            if (!pending.success) {
+                if (!quiet) safe_log(pending.error_msg, "\n");
+                had_error = true;
+            } else {
+                InstallDecision decision;
+                decision.package_name     = pending.pkg_name;
+                decision.apt_argument     = pending.local_path;
+                decision.selected_version = pending.candidate.version;
+                decision.from_napt        = true;
+                decisions.push_back(decision);
+                if (!quiet) {
+                    safe_log("Selected ", pending.pkg_name, 
+                             (!pending.candidate.version.empty() ? " (" + pending.candidate.version + ")" : ""), " from the Napt repository.\n");
+                }
+            }
         }
     }
 
@@ -1712,6 +1854,8 @@ int main(int argc, char** argv) {
         return (apt_ok && napt_ok) ? 0 : 1;
     } else if (command == "clean") {
         return clean_napt_cache() ? 0 : 1;
+    } else if (command == "autoclean") {
+        return autoclean_napt_cache() ? 0 : 1;
     } else if (command == "dist-upgrade") {
 #ifdef nflinux
         do_nflinux_upgrade(apply_host);
