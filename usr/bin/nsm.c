@@ -69,10 +69,26 @@ static void trim(char *s)
     if (i > 0) memmove(s, s + i, strlen(s + i) + 1);
 }
 
+static int exec_abs_argv(char *const argv[])
+{
+    if (!argv || !argv[0]) return -1;
+    if (argv[0][0] == '/') {
+        execv(argv[0], argv);
+    } else {
+        const char *paths[] = {"/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+        char fullpath[PATH_BUF];
+        for (size_t i = 0; i < 4; i++) {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", paths[i], argv[0]);
+            execv(fullpath, argv);
+        }
+    }
+    _exit(127);
+}
+
 static int exec_capture(char *const argv[], char *out, size_t sz)
 {
     int pfd[2];
-    if (pipe(pfd) != 0) return -1;
+    if (pipe2(pfd, O_CLOEXEC) != 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -86,7 +102,7 @@ static int exec_capture(char *const argv[], char *out, size_t sz)
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
         close(pfd[1]);
-        execvp(argv[0], argv);
+        exec_abs_argv(argv);
         _exit(127);
     }
 
@@ -116,7 +132,7 @@ static int exec_silent(char *const argv[])
             dup2(devnull, STDERR_FILENO);
             close(devnull);
         }
-        execvp(argv[0], argv);
+        exec_abs_argv(argv);
         _exit(127);
     }
 
@@ -218,7 +234,7 @@ static double get_vg_free_gb(const char *vg)
     if (exec_capture(argv, out, sizeof(out)) != 0) return 0.0;
     trim(out);
     double val = 0.0;
-    sscanf(out, "%lf", &val);
+    if (sscanf(out, "%lf", &val) != 1) return 0.0;
     return val;
 }
 
@@ -243,9 +259,10 @@ static void unfreeze_mount(const char *mountpoint)
 
 static bool write_snapshot_meta(const char *dir, const SnapshotMeta *meta)
 {
-    char path[PATH_BUF];
+    char path[PATH_BUF], tmp_path[PATH_BUF];
     snprintf(path, sizeof(path), "%s/%s", dir, META_FILE);
-    FILE *f = fopen(path, "w");
+    snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp.%d", dir, META_FILE, (int)getpid());
+    FILE *f = fopen(tmp_path, "w");
     if (!f) return false;
     fprintf(f, "kind=%s\n",            meta->kind);
     fprintf(f, "type=%s\n",            meta->type);
@@ -257,8 +274,29 @@ static bool write_snapshot_meta(const char *dir, const SnapshotMeta *meta)
     fprintf(f, "origin_lv=%s\n",       meta->origin_lv);
     fprintf(f, "origin_lvpath=%s\n",   meta->origin_lvpath);
     fprintf(f, "snapshot_lvpath=%s\n", meta->snapshot_lvpath);
+    fflush(f);
+    int fd = fileno(f);
+    if (fd >= 0) fsync(fd);
     fclose(f);
+    if (rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
     return true;
+}
+
+static void set_meta_field(SnapshotMeta *meta, const char *key, const char *val)
+{
+    if (strcmp(key, "kind") == 0) snprintf(meta->kind, sizeof(meta->kind), "%s", val);
+    else if (strcmp(key, "type") == 0) snprintf(meta->type, sizeof(meta->type), "%s", val);
+    else if (strcmp(key, "name") == 0) snprintf(meta->name, sizeof(meta->name), "%s", val);
+    else if (strcmp(key, "timestamp") == 0) snprintf(meta->timestamp, sizeof(meta->timestamp), "%s", val);
+    else if (strcmp(key, "origin_mount") == 0) snprintf(meta->origin_mount, sizeof(meta->origin_mount), "%s", val);
+    else if (strcmp(key, "origin_source") == 0) snprintf(meta->origin_source, sizeof(meta->origin_source), "%s", val);
+    else if (strcmp(key, "origin_vg") == 0) snprintf(meta->origin_vg, sizeof(meta->origin_vg), "%s", val);
+    else if (strcmp(key, "origin_lv") == 0) snprintf(meta->origin_lv, sizeof(meta->origin_lv), "%s", val);
+    else if (strcmp(key, "origin_lvpath") == 0) snprintf(meta->origin_lvpath, sizeof(meta->origin_lvpath), "%s", val);
+    else if (strcmp(key, "snapshot_lvpath") == 0) snprintf(meta->snapshot_lvpath, sizeof(meta->snapshot_lvpath), "%s", val);
 }
 
 static bool read_snapshot_meta(const char *dir, SnapshotMeta *meta)
@@ -275,18 +313,7 @@ static bool read_snapshot_meta(const char *dir, SnapshotMeta *meta)
         if (!eq) continue;
         *eq = '\0';
         char *key = line, *val = eq + 1;
-#define FIELD(K, DST) if (strcmp(key, K) == 0) snprintf(DST, sizeof(DST), "%s", val);
-        FIELD("kind",            meta->kind)
-        FIELD("type",            meta->type)
-        FIELD("name",            meta->name)
-        FIELD("timestamp",       meta->timestamp)
-        FIELD("origin_mount",    meta->origin_mount)
-        FIELD("origin_source",   meta->origin_source)
-        FIELD("origin_vg",       meta->origin_vg)
-        FIELD("origin_lv",       meta->origin_lv)
-        FIELD("origin_lvpath",   meta->origin_lvpath)
-        FIELD("snapshot_lvpath", meta->snapshot_lvpath)
-#undef FIELD
+        set_meta_field(meta, key, val);
     }
     fclose(f);
     return meta->kind[0] != '\0' && meta->snapshot_lvpath[0] != '\0';
@@ -444,19 +471,27 @@ static bool initramfs_has_lvm_hook(void)
 static bool rollback_home(const SnapshotMeta *meta)
 {
     run_args_silent("fuser", "-km", "/home", NULL);
-    sleep(1);
-    sync();
 
-    if (umount(HOME_SOURCE) != 0)
-        run_args_silent("umount", "-l", "/home", NULL);
-    sleep(1);
+    bool processes_cleared = false;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        usleep(500000);
+        CmdResult ck = run_args("fuser", "/home", NULL);
+        if (ck.rc != 0 || ck.out[0] == '\0') {
+            processes_cleared = true;
+            break;
+        }
+        run_args_silent("fuser", "-km", "/home", NULL);
+    }
 
-    CmdResult ck = run_args("fuser", "/home", NULL);
-    if (ck.rc == 0 && ck.out[0] != '\0') {
-        printf("Rollback failed: processes still hold /home open.\n");
-        run_args_silent("mount", "/home", NULL);
+    if (!processes_cleared) {
+        printf("Rollback failed: processes still hold /home open after retries.\n");
         return false;
     }
+
+    sync();
+    if (umount(HOME_SOURCE) != 0)
+        run_args_silent("umount", "-l", "/home", NULL);
+    usleep(500000);
 
     sync();
     run_args("lvchange", "-an", meta->origin_lvpath, NULL);
@@ -512,7 +547,7 @@ static void list_dir(const char *dir)
 {
     DIR *d = opendir(dir);
     if (!d) return;
-    char *roots[256], *homes[256];
+    char *roots[256] = {0}, *homes[256] = {0};
     int nr = 0, nh = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -521,16 +556,26 @@ static void list_dir(const char *dir)
         snprintf(meta, sizeof(meta), "%s/%s/%s", dir, e->d_name, META_FILE);
         if (access(meta, F_OK) != 0) continue;
         if (strncmp(e->d_name, "root-", 5) == 0) {
-            if (nr < 256) roots[nr++] = strdup(e->d_name);
+            if (nr < 256) {
+                char *s = strdup(e->d_name);
+                if (s) roots[nr++] = s;
+            } else {
+                fprintf(stderr, "Warning: snapshot limit reached (256 roots)\n");
+            }
         } else if (strncmp(e->d_name, "home-", 5) == 0) {
-            if (nh < 256) homes[nh++] = strdup(e->d_name);
+            if (nh < 256) {
+                char *s = strdup(e->d_name);
+                if (s) homes[nh++] = s;
+            } else {
+                fprintf(stderr, "Warning: snapshot limit reached (256 homes)\n");
+            }
         }
     }
     closedir(d);
     printf("  Snapshots:\n");
     if (!nr && !nh) printf("    (none)\n");
-    for (int i = 0; i < nr; i++) { printf("    %s\n", roots[i]); free(roots[i]); }
-    for (int i = 0; i < nh; i++) { printf("    %s\n", homes[i]); free(homes[i]); }
+    for (int i = 0; i < nr; i++) { if (roots[i]) { printf("    %s\n", roots[i]); free(roots[i]); } }
+    for (int i = 0; i < nh; i++) { if (homes[i]) { printf("    %s\n", homes[i]); free(homes[i]); } }
 }
 
 static void list_snapshots(void)
@@ -548,13 +593,16 @@ static int cmp_str(const void *a, const void *b)
 
 static void drop_oldest(const char *dir, char **arr, int count)
 {
-    if (count <= 6) return;
+    if (count <= 6 || !arr || !arr[0]) return;
     char path[PATH_BUF], metapath[PATH_BUF];
     snprintf(path,     sizeof(path),     "%s/%s", dir, arr[0]);
     snprintf(metapath, sizeof(metapath), "%s/%s", path, META_FILE);
     SnapshotMeta sm;
-    if (read_snapshot_meta(path, &sm))
-        delete_snapshot_lv(sm.snapshot_lvpath);
+    if (read_snapshot_meta(path, &sm)) {
+        if (!delete_snapshot_lv(sm.snapshot_lvpath)) {
+            fprintf(stderr, "Warning: failed to remove snapshot LV '%s' (or already removed). Cleaning up metadata.\n", sm.snapshot_lvpath);
+        }
+    }
     unlink(metapath);
     rmdir(path);
 }
@@ -563,7 +611,7 @@ static void cleanup_dir(const char *dir)
 {
     DIR *d = opendir(dir);
     if (!d) return;
-    char *roots[256], *homes[256];
+    char *roots[256] = {0}, *homes[256] = {0};
     int nr = 0, nh = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -572,9 +620,15 @@ static void cleanup_dir(const char *dir)
         snprintf(meta, sizeof(meta), "%s/%s/%s", dir, e->d_name, META_FILE);
         if (access(meta, F_OK) != 0) continue;
         if (strncmp(e->d_name, "root-", 5) == 0) {
-            if (nr < 256) roots[nr++] = strdup(e->d_name);
+            if (nr < 256) {
+                char *s = strdup(e->d_name);
+                if (s) roots[nr++] = s;
+            }
         } else if (strncmp(e->d_name, "home-", 5) == 0) {
-            if (nh < 256) homes[nh++] = strdup(e->d_name);
+            if (nh < 256) {
+                char *s = strdup(e->d_name);
+                if (s) homes[nh++] = s;
+            }
         }
     }
     closedir(d);
@@ -585,8 +639,8 @@ static void cleanup_dir(const char *dir)
     drop_oldest(dir, roots, nr);
     drop_oldest(dir, homes, nh);
 
-    for (int i = 0; i < nr; i++) free(roots[i]);
-    for (int i = 0; i < nh; i++) free(homes[i]);
+    for (int i = 0; i < nr; i++) if (roots[i]) free(roots[i]);
+    for (int i = 0; i < nh; i++) if (homes[i]) free(homes[i]);
 }
 
 static void autodel_snapshots(void)
@@ -672,22 +726,27 @@ static void monitor_thinpool(const char *mountpoint)
 
         usage = get_thinpool_usage(info.vg, pool);
         if (usage >= 93.0) {
-            SnapSizeInfo snaps[512];
+            int max_snaps = 512;
+            SnapSizeInfo *snaps = calloc(max_snaps, sizeof(SnapSizeInfo));
+            if (!snaps) return;
+
             int count = 0;
-            count = gather_snapshots(MANUAL_DIR, snaps, count, 512);
-            count = gather_snapshots(AUTO_DIR, snaps, count, 512);
-            count = gather_snapshots(DAEMON_AUTO_DIR, snaps, count, 512);
+            count = gather_snapshots(MANUAL_DIR, snaps, count, max_snaps);
+            count = gather_snapshots(AUTO_DIR, snaps, count, max_snaps);
+            count = gather_snapshots(DAEMON_AUTO_DIR, snaps, count, max_snaps);
 
             qsort(snaps, count, sizeof(SnapSizeInfo), cmp_snap_size);
 
             for (int i = 0; i < count && usage >= 93.0; i++) {
-                delete_snapshot_lv(snaps[i].lvpath);
-                char metapath[PATH_BUF];
-                snprintf(metapath, sizeof(metapath), "%s/%s", snaps[i].dir, META_FILE);
-                unlink(metapath);
-                rmdir(snaps[i].dir);
-                usage = get_thinpool_usage(info.vg, pool);
+                if (delete_snapshot_lv(snaps[i].lvpath)) {
+                    char metapath[PATH_BUF];
+                    snprintf(metapath, sizeof(metapath), "%s/%s", snaps[i].dir, META_FILE);
+                    unlink(metapath);
+                    rmdir(snaps[i].dir);
+                    usage = get_thinpool_usage(info.vg, pool);
+                }
             }
+            free(snaps);
         }
     }
 }
@@ -706,16 +765,28 @@ static void print_usage(const char *prog)
 
 int main(int argc, char *argv[])
 {
-    if (geteuid() != 0) {
-        fprintf(stderr, "Error: root privileges required.\n");
-        return 1;
-    }
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
 
     const char *cmd = argv[1];
+
+    if (strcmp(cmd, "moo") == 0) {
+        printf("\n         (__) \n"
+               "         (oo)   snapshot edition\n"
+               "   /------\\/ \n"
+               "  / |    ||  \n"
+               " *  ||---||  \n"
+               "    ^^   ^^  \n"
+               "...This NSM Has Super Snapshot Powers.\n\n");
+        return 0;
+    }
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "Error: root privileges required.\n");
+        return 1;
+    }
 
     if (strcmp(cmd, "create") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
