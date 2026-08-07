@@ -1,4 +1,5 @@
-<img width="3352" height="752" alt="The" src="https://github.com/user-attachments/assets/9edd72f1-a4c5-49da-ac38-6cd835661797" />
+<img width="500" height="500" alt="emblem-debian-white" src="https://github.com/user-attachments/assets/6ef8eb64-5ca4-4f19-908e-b746acc7dec1" />
+
 
 # Arvor Linux : When Atomicity Meets Mutability.
 ARM Readme:https://github.com/NextFerret/arvor/blob/main/README-ARM.md
