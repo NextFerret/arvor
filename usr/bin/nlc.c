@@ -28,7 +28,22 @@ typedef struct {
     char *url;
     char *fs_type;
     char *size;
+    int moo;
 } Options;
+
+static Options *g_active_options = NULL;
+
+static void free_options(Options *o) {
+    if (!o) return;
+    free(o->name);
+    free(o->distro);
+    free(o->release);
+    free(o->exec_cmd);
+    free(o->url);
+    free(o->fs_type);
+    free(o->size);
+    memset(o, 0, sizeof(*o));
+}
 
 static void fail(const char *fmt, ...) {
     va_list args;
@@ -36,7 +51,36 @@ static void fail(const char *fmt, ...) {
     vfprintf(stderr, fmt, args);
     fprintf(stderr, "\n");
     va_end(args);
+    if (g_active_options) {
+        free_options(g_active_options);
+    }
     exit(1);
+}
+
+static void exec_abs(const char *binary, const char *arg0, ...) {
+    char *args[64];
+    int n = 0;
+    args[n++] = (char *)arg0;
+    va_list ap;
+    va_start(ap, arg0);
+    const char *a;
+    while ((a = va_arg(ap, const char *)) != NULL && n < 63) {
+        args[n++] = (char *)a;
+    }
+    va_end(ap);
+    args[n] = NULL;
+
+    if (binary[0] == '/') {
+        execv(binary, args);
+    } else {
+        const char *paths[] = {"/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+        char fullpath[4096];
+        for (size_t i = 0; i < 4; i++) {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", paths[i], binary);
+            execv(fullpath, args);
+        }
+    }
+    _exit(127);
 }
 
 static char *dup_string(const char *value) {
@@ -150,7 +194,7 @@ static void ensure_base_dirs(void) {
 static void copy_file(const char *src, const char *dst) {
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("cp", "cp", src, dst, NULL);
+        exec_abs("cp", "cp", src, dst, NULL);
         _exit(127);
     }
     int status;
@@ -173,7 +217,7 @@ static void mount_chroot(const char *path) {
 
             pid_t pid = fork();
             if (pid == 0) {
-                execlp("mountpoint", "mountpoint", "-q", target, NULL);
+                exec_abs("mountpoint", "mountpoint", "-q", target, NULL);
                 _exit(127);
             }
             int status;
@@ -182,7 +226,7 @@ static void mount_chroot(const char *path) {
             if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
                 pid = fork();
                 if (pid == 0) {
-                    execlp("mount", "mount", "--bind", mounts[i], target, NULL);
+                    exec_abs("mount", "mount", "--bind", mounts[i], target, NULL);
                     _exit(127);
                 }
                 waitpid(pid, NULL, 0);
@@ -196,7 +240,7 @@ static void mount_chroot(const char *path) {
 
         pid_t pid = fork();
         if (pid == 0) {
-            execlp("mountpoint", "mountpoint", "-q", target, NULL);
+            exec_abs("mountpoint", "mountpoint", "-q", target, NULL);
             _exit(127);
         }
         int status;
@@ -205,7 +249,7 @@ static void mount_chroot(const char *path) {
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             pid = fork();
             if (pid == 0) {
-                execlp("mount", "mount", "--bind", "/tmp/.X11-unix", target, NULL);
+                exec_abs("mount", "mount", "--bind", "/tmp/.X11-unix", target, NULL);
                 _exit(127);
             }
             waitpid(pid, NULL, 0);
@@ -221,7 +265,7 @@ static void mount_chroot(const char *path) {
             dup2(fileno(devnull), STDERR_FILENO);
             fclose(devnull);
         }
-        execlp("chmod", "chmod", "1777", tmp_path, NULL);
+        exec_abs("chmod", "chmod", "1777", tmp_path, NULL);
         _exit(127);
     }
     waitpid(pid, NULL, 0);
@@ -236,22 +280,31 @@ static void umount_chroot(const char *path) {
         snprintf(target, sizeof(target), "%s%s", path, mounts[i]);
         pid_t pid = fork();
         if (pid == 0) {
-            FILE *devnull = fopen("/dev/null", "w");
-            if (devnull) {
-                dup2(fileno(devnull), STDERR_FILENO);
-                fclose(devnull);
-            }
-            execlp("umount", "umount", "-l", target, NULL);
+            exec_abs("mountpoint", "mountpoint", "-q", target, NULL);
             _exit(127);
         }
-        waitpid(pid, NULL, 0);
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            pid = fork();
+            if (pid == 0) {
+                FILE *devnull = fopen("/dev/null", "w");
+                if (devnull) {
+                    dup2(fileno(devnull), STDERR_FILENO);
+                    fclose(devnull);
+                }
+                exec_abs("umount", "umount", "-l", target, NULL);
+                _exit(127);
+            }
+            waitpid(pid, NULL, 0);
+        }
     }
 }
 
 static void download_archive(const char *source, const char *destination) {
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("curl", "curl", "-L", "--fail", source, "-o", destination, NULL);
+        exec_abs("curl", "curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", source, "-o", destination, NULL);
         _exit(127);
     }
     int status;
@@ -277,7 +330,7 @@ static void extract_archive(const char *archive, const char *target) {
 
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("tar", "tar", flag, archive, "-C", target, NULL);
+        exec_abs("tar", "tar", flag, archive, "-C", target, NULL);
         _exit(127);
     }
     int status;
@@ -310,14 +363,21 @@ static void install_chroot_from_archive(const char *source, const char *target) 
             strncat(archive, ".tar", sizeof(archive) - strlen(archive) - 1);
         }
         download_archive(source, archive);
-        extract_archive(archive, target);
-
+        
         pid_t pid = fork();
         if (pid == 0) {
-            execlp("rm", "rm", "-f", archive, NULL);
+            const char *flag = (tar_supports(archive, ".tar.gz") || tar_supports(archive, ".tgz")) ? "-xzf" :
+                               (tar_supports(archive, ".tar.xz") || tar_supports(archive, ".txz")) ? "-xJf" :
+                               (tar_supports(archive, ".tar.bz2") || tar_supports(archive, ".tbz2")) ? "-xjf" : "-xf";
+            exec_abs("tar", "tar", flag, archive, "-C", target, NULL);
             _exit(127);
         }
-        waitpid(pid, NULL, 0);
+        int status;
+        waitpid(pid, &status, 0);
+        unlink(archive);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            fail("Failed to extract archive");
+        }
     } else {
         extract_archive(source, target);
     }
@@ -340,7 +400,7 @@ static void bootstrap_chroot(const char *distro, const char *release, const char
 
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("debootstrap", "debootstrap", "--arch", arch, "--variant=minbase", release, target, mirror, NULL);
+        exec_abs("debootstrap", "debootstrap", "--arch", arch, "--variant=minbase", release, target, mirror, NULL);
         _exit(127);
     }
     int status;
@@ -364,14 +424,14 @@ static void ensure_host_user_inside(const char *target) {
 
     pid = fork();
     if (pid == 0) {
-        execlp("chroot", "chroot", target, "getent", "group", user, NULL);
+        exec_abs("chroot", "chroot", target, "getent", "group", user, NULL);
         _exit(127);
     }
     waitpid(pid, &status, 0);
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         pid = fork();
         if (pid == 0) {
-            execlp("chroot", "chroot", target, "groupadd", user, NULL);
+            exec_abs("chroot", "chroot", target, "groupadd", user, NULL);
             _exit(127);
         }
         waitpid(pid, NULL, 0);
@@ -379,14 +439,14 @@ static void ensure_host_user_inside(const char *target) {
 
     pid = fork();
     if (pid == 0) {
-        execlp("chroot", "chroot", target, "id", "-u", user, NULL);
+        exec_abs("chroot", "chroot", target, "id", "-u", user, NULL);
         _exit(127);
     }
     waitpid(pid, &status, 0);
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         pid = fork();
         if (pid == 0) {
-            execlp("chroot", "chroot", target, "useradd", "-m", "-g", user, "-s", "/bin/bash", user, NULL);
+            exec_abs("chroot", "chroot", target, "useradd", "-m", "-g", user, "-s", "/bin/bash", user, NULL);
             _exit(127);
         }
         waitpid(pid, NULL, 0);
@@ -400,7 +460,7 @@ static void ensure_host_user_inside(const char *target) {
             dup2(fileno(devnull), STDERR_FILENO);
             fclose(devnull);
         }
-        execlp("chroot", "chroot", target, "usermod", "-aG", "sudo", user, NULL);
+        exec_abs("chroot", "chroot", target, "usermod", "-aG", "sudo", user, NULL);
         _exit(127);
     }
     waitpid(pid, NULL, 0);
@@ -409,7 +469,7 @@ static void ensure_host_user_inside(const char *target) {
     snprintf(sudoers_cmd, sizeof(sudoers_cmd), "printf '%%s ALL=(ALL) NOPASSWD: ALL\\n' '%s' > /etc/sudoers.d/%s", user, user);
     pid = fork();
     if (pid == 0) {
-        execlp("chroot", "chroot", target, "/bin/sh", "-c", sudoers_cmd, NULL);
+        exec_abs("chroot", "chroot", target, "/bin/sh", "-c", sudoers_cmd, NULL);
         _exit(127);
     }
     waitpid(pid, NULL, 0);
@@ -423,7 +483,7 @@ static void ensure_host_user_inside(const char *target) {
             dup2(fileno(devnull), STDERR_FILENO);
             fclose(devnull);
         }
-        execlp("chroot", "chroot", target, "chmod", "0440", sud_file, NULL);
+        exec_abs("chroot", "chroot", target, "chmod", "0440", sud_file, NULL);
         _exit(127);
     }
     waitpid(pid, NULL, 0);
@@ -451,6 +511,8 @@ static char *next_value(int *index, int argc, char **argv) {
     *index += 1;
     return dup_string(argv[*index]);
 }
+
+static void validate_size(const char *size);
 
 static void parse_args(int argc, char **argv, Options *options) {
     int i;
@@ -499,13 +561,15 @@ static void parse_args(int argc, char **argv, Options *options) {
             options->size = value_after_equals(argv[i]);
         } else if (strcmp(argv[i], "-s") == 0) {
             options->size = next_value(&i, argc, argv);
+        } else if (strcmp(argv[i], "moo") == 0 || strcmp(argv[i], "-moo") == 0) {
+            options->moo = 1;
         } else {
             fail("Unknown argument: %s", argv[i]);
         }
     }
 
-    if (options->distro) {
-        lower_string(options->distro);
+    if (options->size) {
+        validate_size(options->size);
     }
 }
 
@@ -579,7 +643,7 @@ static void run_cmd(const char *prog, ...) {
     args[n++] = prog;
     va_start(ap, prog);
     const char *a;
-    while ((a = va_arg(ap, const char *)) != NULL) {
+    while ((a = va_arg(ap, const char *)) != NULL && n < 63) {
         args[n++] = a;
     }
     va_end(ap);
@@ -587,7 +651,16 @@ static void run_cmd(const char *prog, ...) {
 
     pid_t pid = fork();
     if (pid == 0) {
-        execvp(prog, (char * const *)args);
+        if (prog[0] == '/') {
+            execv(prog, (char * const *)args);
+        } else {
+            const char *paths[] = {"/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+            char fullpath[4096];
+            for (size_t i = 0; i < 4; i++) {
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", paths[i], prog);
+                execv(fullpath, (char * const *)args);
+            }
+        }
         _exit(127);
     }
     int status;
@@ -597,68 +670,81 @@ static void run_cmd(const char *prog, ...) {
     }
 }
 
-static void create_sparse_chroot(const Options *options, const char *target) {
-    char img_path[4096];
-    char loop_dev[256];
-    char mkfs_cmd[64];
-    FILE *fp;
-
-    snprintf(img_path, sizeof(img_path), "%s.img", target);
-
-    if (path_exists(img_path)) {
-        fail("Image already exists: %s", img_path);
+static void validate_size(const char *size) {
+    if (!size || size[0] == '\0') {
+        fail("Size parameter (-s) cannot be empty");
     }
+    size_t len = strlen(size);
+    size_t i = 0;
+    while (i < len && isdigit((unsigned char)size[i])) {
+        i++;
+    }
+    if (i == 0) {
+        fail("Invalid size (-s '%s'): must start with a number", size);
+    }
+    if (i < len) {
+        if (i + 1 == len) {
+            char suffix = toupper((unsigned char)size[i]);
+            if (suffix != 'K' && suffix != 'M' && suffix != 'G' && suffix != 'T') {
+                fail("Invalid size suffix (-s '%s'): must be K, M, G, or T", size);
+            }
+        } else {
+            fail("Invalid size format (-s '%s')", size);
+        }
+    }
+}
 
+static void setup_sparse_image(const Options *options, const char *img_path, char *mkfs_cmd, size_t mkfs_sz) {
     run_cmd("truncate", "-s", options->size, img_path, NULL);
 
     if (strcmp(options->fs_type, "xfs") == 0) {
-        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.xfs");
+        snprintf(mkfs_cmd, mkfs_sz, "mkfs.xfs");
     } else if (strcmp(options->fs_type, "ext4") == 0) {
-        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext4");
+        snprintf(mkfs_cmd, mkfs_sz, "mkfs.ext4");
     } else if (strcmp(options->fs_type, "ext3") == 0) {
-        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext3");
+        snprintf(mkfs_cmd, mkfs_sz, "mkfs.ext3");
     } else if (strcmp(options->fs_type, "ext2") == 0) {
-        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.ext2");
+        snprintf(mkfs_cmd, mkfs_sz, "mkfs.ext2");
     } else if (strcmp(options->fs_type, "btrfs") == 0) {
-        snprintf(mkfs_cmd, sizeof(mkfs_cmd), "mkfs.btrfs");
+        snprintf(mkfs_cmd, mkfs_sz, "mkfs.btrfs");
     } else {
         fail("Unsupported filesystem type: %s (supported: ext2, ext3, ext4, xfs, btrfs)", options->fs_type);
     }
 
     run_cmd(mkfs_cmd, "-F", img_path, NULL);
+}
 
-    {
-        int losetup_pipe[2];
-        if (pipe(losetup_pipe) != 0)
-            fail("Failed to create pipe for losetup");
+static void setup_loop_device(const char *img_path, char *loop_dev, size_t sz) {
+    int losetup_pipe[2];
+    if (pipe(losetup_pipe) != 0)
+        fail("Failed to create pipe for losetup");
 
-        pid_t lpid = fork();
-        if (lpid < 0) {
-            close(losetup_pipe[0]);
-            close(losetup_pipe[1]);
-            fail("Failed to fork for losetup");
-        }
-        if (lpid == 0) {
-            close(losetup_pipe[0]);
-            dup2(losetup_pipe[1], STDOUT_FILENO);
-            close(losetup_pipe[1]);
-            execlp("losetup", "losetup", "-f", "--show", img_path, NULL);
-            _exit(127);
-        }
+    pid_t lpid = fork();
+    if (lpid < 0) {
+        close(losetup_pipe[0]);
         close(losetup_pipe[1]);
-        fp = fdopen(losetup_pipe[0], "r");
-        if (!fp) {
-            close(losetup_pipe[0]);
-            fail("Failed to open pipe for losetup output");
-        }
-        int lstat;
-        waitpid(lpid, &lstat, 0);
-        if (!WIFEXITED(lstat) || WEXITSTATUS(lstat) != 0) {
-            fclose(fp);
-            fail("losetup failed on %s", img_path);
-        }
+        fail("Failed to fork for losetup");
     }
-    if (!fgets(loop_dev, sizeof(loop_dev), fp)) {
+    if (lpid == 0) {
+        close(losetup_pipe[0]);
+        dup2(losetup_pipe[1], STDOUT_FILENO);
+        close(losetup_pipe[1]);
+        exec_abs("losetup", "losetup", "-f", "--show", img_path, NULL);
+        _exit(127);
+    }
+    close(losetup_pipe[1]);
+    FILE *fp = fdopen(losetup_pipe[0], "r");
+    if (!fp) {
+        close(losetup_pipe[0]);
+        fail("Failed to open pipe for losetup output");
+    }
+    int lstat;
+    waitpid(lpid, &lstat, 0);
+    if (!WIFEXITED(lstat) || WEXITSTATUS(lstat) != 0) {
+        fclose(fp);
+        fail("losetup failed on %s", img_path);
+    }
+    if (!fgets(loop_dev, sz, fp)) {
         fclose(fp);
         fail("Failed to read loop device name from losetup");
     }
@@ -672,7 +758,10 @@ static void create_sparse_chroot(const Options *options, const char *target) {
     if (len == 0) {
         fail("losetup returned empty device name");
     }
+}
 
+static void mount_and_bootstrap(const Options *options, const char *img_path, const char *loop_dev, const char *target) {
+    (void)img_path;
     mkdir_p(target);
     run_cmd("mount", loop_dev, target, NULL);
 
@@ -686,6 +775,22 @@ static void create_sparse_chroot(const Options *options, const char *target) {
 
     run_cmd("umount", target, NULL);
     run_cmd("losetup", "-d", loop_dev, NULL);
+}
+
+static void create_sparse_chroot(const Options *options, const char *target) {
+    char img_path[4096];
+    char loop_dev[256];
+    char mkfs_cmd[64];
+
+    snprintf(img_path, sizeof(img_path), "%s.img", target);
+
+    if (path_exists(img_path)) {
+        fail("Image already exists: %s", img_path);
+    }
+
+    setup_sparse_image(options, img_path, mkfs_cmd, sizeof(mkfs_cmd));
+    setup_loop_device(img_path, loop_dev, sizeof(loop_dev));
+    mount_and_bootstrap(options, img_path, loop_dev, target);
 
     printf("Sparse image created at %s (%s, %s)\n", img_path, options->fs_type, options->size);
     printf("Mount with:  mount -o loop %s %s\n", img_path, target);
@@ -694,6 +799,8 @@ static void create_sparse_chroot(const Options *options, const char *target) {
 static void validate_name(const char *name) {
     if (!name || name[0] == '\0')
         fail("Chroot name must not be empty");
+    if (name[0] == '.')
+        fail("Invalid chroot name: '%s' must not start with '.'", name);
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
         fail("Invalid chroot name: '%s'", name);
     for (const char *p = name; *p; p++) {
@@ -786,7 +893,7 @@ static void enter_chroot(const Options *options) {
             dup2(fileno(devnull), STDERR_FILENO);
             fclose(devnull);
         }
-        execlp("xhost", "xhost", local_user, NULL);
+        exec_abs("xhost", "xhost", local_user, NULL);
         _exit(127);
     }
     waitpid(pid, NULL, 0);
@@ -797,14 +904,14 @@ static void enter_chroot(const Options *options) {
 
         pid = fork();
         if (pid == 0) {
-            execlp("touch", "touch", chroot_xauth, NULL);
+            exec_abs("touch", "touch", chroot_xauth, NULL);
             _exit(127);
         }
         waitpid(pid, NULL, 0);
 
         pid = fork();
         if (pid == 0) {
-            execlp("mountpoint", "mountpoint", "-q", chroot_xauth, NULL);
+            exec_abs("mountpoint", "mountpoint", "-q", chroot_xauth, NULL);
             _exit(127);
         }
         waitpid(pid, &status, 0);
@@ -812,7 +919,7 @@ static void enter_chroot(const Options *options) {
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             pid = fork();
             if (pid == 0) {
-                execlp("mount", "mount", "--bind", xauth, chroot_xauth, NULL);
+                exec_abs("mount", "mount", "--bind", xauth, chroot_xauth, NULL);
                 _exit(127);
             }
             waitpid(pid, &status, 0);
@@ -827,14 +934,14 @@ static void enter_chroot(const Options *options) {
 
         pid = fork();
         if (pid == 0) {
-            execlp("touch", "touch", runtime_target, NULL);
+            exec_abs("touch", "touch", runtime_target, NULL);
             _exit(127);
         }
         waitpid(pid, NULL, 0);
 
         pid = fork();
         if (pid == 0) {
-            execlp("mountpoint", "mountpoint", "-q", runtime_target, NULL);
+            exec_abs("mountpoint", "mountpoint", "-q", runtime_target, NULL);
             _exit(127);
         }
         waitpid(pid, &status, 0);
@@ -844,7 +951,7 @@ static void enter_chroot(const Options *options) {
             snprintf(src_wayland, sizeof(src_wayland), "%s/%s", runtime_dir, wayland);
             pid = fork();
             if (pid == 0) {
-                execlp("mount", "mount", "--bind", src_wayland, runtime_target, NULL);
+                exec_abs("mount", "mount", "--bind", src_wayland, runtime_target, NULL);
                 _exit(127);
             }
             waitpid(pid, NULL, 0);
@@ -864,9 +971,9 @@ static void enter_chroot(const Options *options) {
             setenv("QT_QPA_PLATFORM",   "wayland",                     1);
             setenv("XAUTHORITY",        xauth_env,                     1);
             if (options->exec_cmd) {
-                execlp("chroot", "chroot", target, "/bin/sh", "-c", options->exec_cmd, NULL);
+                exec_abs("chroot", "chroot", target, "/bin/sh", "-c", options->exec_cmd, NULL);
             } else {
-                execlp("chroot", "chroot", target, "/bin/bash", "-l", NULL);
+                exec_abs("chroot", "chroot", target, "/bin/bash", "-l", NULL);
             }
             _exit(127);
         }
@@ -881,9 +988,9 @@ static void enter_chroot(const Options *options) {
             setenv("QT_QPA_PLATFORM",   "wayland",                     1);
             setenv("XAUTHORITY",        xauth_env,                     1);
             if (options->exec_cmd) {
-                execlp("chroot", "chroot", target, "/bin/su", "-", user, "-c", options->exec_cmd, NULL);
+                exec_abs("chroot", "chroot", target, "/bin/su", "-", user, "-c", options->exec_cmd, NULL);
             } else {
-                execlp("chroot", "chroot", target, "/bin/su", "-", user, NULL);
+                exec_abs("chroot", "chroot", target, "/bin/su", "-", user, NULL);
             }
             _exit(127);
         }
@@ -900,7 +1007,7 @@ static void enter_chroot(const Options *options) {
                 dup2(fileno(devnull), STDERR_FILENO);
                 fclose(devnull);
             }
-            execlp("umount", "umount", "-l", xa_path, NULL);
+            exec_abs("umount", "umount", "-l", xa_path, NULL);
             _exit(127);
         }
         waitpid(pid, NULL, 0);
@@ -927,7 +1034,7 @@ static void delete_chroot(const Options *options) {
     umount_chroot(target);
     pid = fork();
     if (pid == 0) {
-        execlp("rm", "rm", "-rf", target, NULL);
+        exec_abs("rm", "rm", "-rf", target, NULL);
         _exit(127);
     }
     waitpid(pid, &status, 0);
@@ -938,40 +1045,53 @@ static void delete_chroot(const Options *options) {
 
 int main(int argc, char **argv) {
     Options options;
+    memset(&options, 0, sizeof(options));
+    g_active_options = &options;
+
+    if (argc == 1) {
+        usage(argv[0]);
+        free_options(&options);
+        return 0;
+    }
+
+    parse_args(argc, argv, &options);
+
+    if (options.moo) {
+        printf("\n         (__) \n"
+               "         (oo)   chroot edition\n"
+               "   /------\\/ \n"
+               "  / |    ||  \n"
+               " *  ||---||  \n"
+               "    ^^   ^^  \n"
+               "...This NLC Has Super Chroot Powers.\n\n");
+        free_options(&options);
+        g_active_options = NULL;
+        return 0;
+    }
 
     if (geteuid() != 0) {
         fail("Run as root");
     }
 
-    if (argc == 1) {
-        usage(argv[0]);
-        return 0;
-    }
-
     ensure_base_dirs();
-    parse_args(argc, argv, &options);
 
+    int rc = 0;
     if (options.version) {
         printf("nlc %s\n", VERSION);
-        return 0;
-    }
-    if (options.list) {
+    } else if (options.list) {
         list_chroots();
-        return 0;
-    }
-    if (options.create) {
+    } else if (options.create) {
         create_chroot(&options);
-        return 0;
-    }
-    if (options.enter) {
+    } else if (options.enter) {
         enter_chroot(&options);
-        return 0;
-    }
-    if (options.delete_mode) {
+    } else if (options.delete_mode) {
         delete_chroot(&options);
-        return 0;
+    } else {
+        usage(argv[0]);
+        rc = 1;
     }
 
-    usage(argv[0]);
-    return 1;
+    free_options(&options);
+    g_active_options = NULL;
+    return rc;
 }

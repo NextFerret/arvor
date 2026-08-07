@@ -187,6 +187,22 @@ static bool wait_for_child(pid_t pid, int& status) {
     }
 }
 
+static void exec_abs_argv(const vector<char*>& argv_ptrs) {
+    if (argv_ptrs.empty() || argv_ptrs[0] == nullptr) _exit(127);
+    const char* binary = argv_ptrs[0];
+    if (strchr(binary, '/')) {
+        execv(binary, const_cast<char* const*>(argv_ptrs.data()));
+    } else {
+        const char* paths[] = {"/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+        char fullpath[4096];
+        for (size_t i = 0; i < 4; ++i) {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", paths[i], binary);
+            execv(fullpath, const_cast<char* const*>(argv_ptrs.data()));
+        }
+    }
+    _exit(127);
+}
+
 static int exec_argv(const vector<string>& args, int stdout_fd = -1, int stderr_fd = -1, int extra_fd = -1) {
     if (args.empty()) return 1;
 
@@ -217,15 +233,29 @@ static int exec_argv(const vector<string>& args, int stdout_fd = -1, int stderr_
             extra_fd != STDOUT_FILENO && extra_fd != STDERR_FILENO)
             close(extra_fd);
 
-        for (int fd = 4; fd < 1024; ++fd) close(fd);
+        DIR* dir = opendir("/proc/self/fd");
+        if (dir) {
+            int dir_fd = dirfd(dir);
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                int fd = atoi(entry->d_name);
+                if (fd > 2 && fd != extra_fd && fd != dir_fd) {
+                    close(fd);
+                }
+            }
+            closedir(dir);
+        } else {
+            int max_fd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+            if (max_fd < 0 || max_fd > 4096) max_fd = 1024;
+            for (int fd = 4; fd < max_fd; ++fd) close(fd);
+        }
 
         vector<char*> argv_ptrs;
         argv_ptrs.reserve(args.size() + 1);
         for (const auto& a : args) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
         argv_ptrs.push_back(nullptr);
 
-        execvp(argv_ptrs[0], argv_ptrs.data());
-        _exit(127);
+        exec_abs_argv(argv_ptrs);
     }
 
     int status = 0;
@@ -245,7 +275,7 @@ static string exec_argv_capture(const vector<string>& args) {
     if (args.empty()) return "";
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) return "";
+    if (pipe2(pipefd, O_CLOEXEC) != 0) return "";
 
     pid_t pid = fork();
     if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
@@ -264,8 +294,7 @@ static string exec_argv_capture(const vector<string>& args) {
         argv_ptrs.reserve(args.size() + 1);
         for (const auto& a : args) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
         argv_ptrs.push_back(nullptr);
-        execvp(argv_ptrs[0], argv_ptrs.data());
-        _exit(127);
+        exec_abs_argv(argv_ptrs);
     }
 
     close(pipefd[1]);
@@ -399,9 +428,14 @@ static double get_vg_free_gb(const string& vg_name) {
     try { return stod(out); } catch (...) { return 0.0; }
 }
 
+static string g_cached_root_dev;
+static string g_cached_vg_name;
+
 bool manage_sandbox(const string& action) {
     string root_dev = get_root_device();
     string vg_name = get_vg_name(root_dev);
+    g_cached_root_dev = root_dev;
+    g_cached_vg_name = vg_name;
     string snap_lv_name = "napt_sandbox_snap";
     string snap_dev = "/dev/" + vg_name + "/" + snap_lv_name;
 
@@ -503,8 +537,7 @@ void cleanup_sandbox_on_exit() {
         exec_argv_devnull_out({"umount", "-l", TREE_ROOT + "/sys"});
         exec_argv_devnull_out({"umount", "-l", TREE_ROOT});
 
-        string root_dev = get_root_device();
-        string vg_name = get_vg_name(root_dev);
+        string vg_name = !g_cached_vg_name.empty() ? g_cached_vg_name : get_vg_name(get_root_device());
         if (!vg_name.empty()) {
             string snap_dev = "/dev/" + vg_name + "/napt_sandbox_snap";
             exec_argv_devnull_out({"lvremove", "-f", snap_dev});
@@ -573,12 +606,19 @@ string sanitize_filename(const string& raw) {
     string base = (pos_slash == string::npos) ? raw : raw.substr(pos_slash + 1);
     size_t start = base.find_first_not_of(" \n\r\t");
     string cleaned = (start == string::npos) ? "" : base.substr(start, base.find_last_not_of(" \n\r\t") - start + 1);
-    while (!cleaned.empty() && cleaned.front() == '-') cleaned.erase(cleaned.begin());
-    size_t pos;
-    while ((pos = cleaned.find("..")) != string::npos) {
-        cleaned.erase(pos, 2);
+    
+    string safe;
+    safe.reserve(cleaned.size());
+    for (char c : cleaned) {
+        if (isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-') {
+            safe.push_back(c);
+        }
     }
-    return cleaned.empty() ? "safe_file" : cleaned;
+    while (!safe.empty() && (safe.front() == '-' || safe.front() == '.')) {
+        safe.erase(safe.begin());
+    }
+    if (safe == "." || safe == "..") safe = "safe_file";
+    return safe.empty() ? "safe_file" : safe;
 }
 
 string fetch_url(const string& url) {
@@ -586,7 +626,7 @@ string fetch_url(const string& url) {
     size_t start = url.find_first_not_of(" \n\r\t");
     string norm_url = (start == string::npos) ? "" : url.substr(start, url.find_last_not_of(" \n\r\t") - start + 1);
     if (norm_url.front() == '-') return "";
-    return exec_argv_capture({"curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30", "--", norm_url});
+    return exec_argv_capture({"curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "10", "--max-time", "30", "--", norm_url});
 }
 
 string trim_copy(const string& s) {
@@ -872,10 +912,23 @@ vector<NaptSource> load_napt_sources() {
 }
 
 bool write_text_file(const string& path, const string& content) {
-    ofstream out(path);
-    if (!out) return false;
-    out << content;
-    return out.good();
+    static std::atomic<uint64_t> seq{0};
+    string tmp_path = path + ".tmp." + to_string(getpid()) + "_" + to_string(seq.fetch_add(1));
+    {
+        ofstream out(tmp_path, ios::out | ios::trunc);
+        if (!out) return false;
+        out << content;
+        out.flush();
+        if (!out.good()) {
+            unlink(tmp_path.c_str());
+            return false;
+        }
+    }
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+        unlink(tmp_path.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool read_text_file(const string& path, string& content) {
@@ -1180,7 +1233,7 @@ bool cache_napt_package(const NaptPackageCandidate& candidate, string& local_pat
     local_path = release_dir + "/" + safe_file;
     string url = build_napt_download_url(candidate);
     if (url.empty() || url.front() == '-') return false;
-    return exec_argv_devnull_out({"curl", "-fsSL", "-o", local_path, "--", url}) == 0;
+    return exec_argv_devnull_out({"curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o", local_path, "--", url}) == 0;
 }
 
 string calculate_sha256(const string& file_path) {
@@ -1197,6 +1250,75 @@ struct PendingNaptDownload {
     bool success = false;
     string error_msg;
 };
+
+static bool download_napt_packages(vector<PendingNaptDownload>& pending_napt_downloads, vector<InstallDecision>& decisions, bool quiet) {
+    if (pending_napt_downloads.empty()) return true;
+
+    size_t num_threads = std::min<size_t>(4, pending_napt_downloads.size());
+    vector<thread> workers;
+    std::atomic<size_t> current_index(0);
+
+    for (size_t t = 0; t < num_threads; ++t) {
+        workers.emplace_back([&]() {
+            while (true) {
+                size_t idx = current_index.fetch_add(1);
+                if (idx >= pending_napt_downloads.size()) break;
+
+                auto& pending = pending_napt_downloads[idx];
+                if (!quiet) safe_log("Downloading Napt package: ", pending.pkg_name, "...\n");
+
+                if (!cache_napt_package(pending.candidate, pending.local_path)) {
+                    pending.error_msg = "E: Failed to download " + pending.pkg_name + " from the Napt repository.";
+                    continue;
+                }
+
+                if (pending.candidate.sha256.empty()) {
+                    pending.error_msg = "E: SHA256 checksum is missing in metadata for package " + pending.pkg_name + ".\nE: Refusing to install unverified package.";
+                    exec_argv_devnull_out({"rm", "-f", pending.local_path});
+                    continue;
+                }
+
+                string local_hash = calculate_sha256(pending.local_path);
+                if (local_hash != pending.candidate.sha256) {
+                    pending.error_msg = "E: SHA256 checksum mismatch for " + pending.pkg_name + ".\nE: Expected: " + pending.candidate.sha256 + "\nE: Got:      " + local_hash + "\nE: Aborting installation of this package.";
+                    exec_argv_devnull_out({"rm", "-f", pending.local_path});
+                    continue;
+                }
+
+                error_code ec;
+                uint64_t file_sz = fs::file_size(pending.local_path, ec);
+                string sz_str = (!ec && file_sz > 0) ? (" [" + format_bytes(file_sz) + "]") : "";
+
+                if (!quiet) safe_log("Downloaded ", pending.pkg_name, sz_str, " [OK]\n");
+                pending.success = true;
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
+    }
+
+    bool ok = true;
+    for (const auto& pending : pending_napt_downloads) {
+        if (!pending.success) {
+            if (!quiet) safe_log(pending.error_msg, "\n");
+            ok = false;
+        } else {
+            InstallDecision decision;
+            decision.package_name     = pending.pkg_name;
+            decision.apt_argument     = pending.local_path;
+            decision.selected_version = pending.candidate.version;
+            decision.from_napt        = true;
+            decisions.push_back(decision);
+            if (!quiet) {
+                safe_log("Selected ", pending.pkg_name, 
+                         (!pending.candidate.version.empty() ? " (" + pending.candidate.version + ")" : ""), " from the Napt repository.\n");
+            }
+        }
+    }
+    return ok;
+}
 
 bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecision>& decisions, bool quiet, bool is_upgrade = false) {
     if (pkgs.empty()) {
@@ -1282,69 +1404,8 @@ bool resolve_install_decisions(const vector<string>& pkgs, vector<InstallDecisio
         }
     }
 
-    if (!pending_napt_downloads.empty()) {
-        size_t num_threads = std::min<size_t>(4, pending_napt_downloads.size());
-        vector<thread> workers;
-        std::atomic<size_t> current_index(0);
-
-        for (size_t t = 0; t < num_threads; ++t) {
-            workers.emplace_back([&]() {
-                while (true) {
-                    size_t idx = current_index.fetch_add(1);
-                    if (idx >= pending_napt_downloads.size()) break;
-
-                    auto& pending = pending_napt_downloads[idx];
-                    if (!quiet) safe_log("Downloading Napt package: ", pending.pkg_name, "...\n");
-
-                    if (!cache_napt_package(pending.candidate, pending.local_path)) {
-                        pending.error_msg = "E: Failed to download " + pending.pkg_name + " from the Napt repository.";
-                        continue;
-                    }
-
-                    if (pending.candidate.sha256.empty()) {
-                        pending.error_msg = "E: SHA256 checksum is missing in metadata for package " + pending.pkg_name + ".\nE: Refusing to install unverified package.";
-                        exec_argv_devnull_out({"rm", "-f", pending.local_path});
-                        continue;
-                    }
-
-                    string local_hash = calculate_sha256(pending.local_path);
-                    if (local_hash != pending.candidate.sha256) {
-                        pending.error_msg = "E: SHA256 checksum mismatch for " + pending.pkg_name + ".\nE: Expected: " + pending.candidate.sha256 + "\nE: Got:      " + local_hash + "\nE: Aborting installation of this package.";
-                        exec_argv_devnull_out({"rm", "-f", pending.local_path});
-                        continue;
-                    }
-
-                    error_code ec;
-                    uint64_t file_sz = fs::file_size(pending.local_path, ec);
-                    string sz_str = (!ec && file_sz > 0) ? (" [" + format_bytes(file_sz) + "]") : "";
-
-                    if (!quiet) safe_log("Downloaded ", pending.pkg_name, sz_str, " [OK]\n");
-                    pending.success = true;
-                }
-            });
-        }
-
-        for (auto& w : workers) {
-            if (w.joinable()) w.join();
-        }
-
-        for (const auto& pending : pending_napt_downloads) {
-            if (!pending.success) {
-                if (!quiet) safe_log(pending.error_msg, "\n");
-                had_error = true;
-            } else {
-                InstallDecision decision;
-                decision.package_name     = pending.pkg_name;
-                decision.apt_argument     = pending.local_path;
-                decision.selected_version = pending.candidate.version;
-                decision.from_napt        = true;
-                decisions.push_back(decision);
-                if (!quiet) {
-                    safe_log("Selected ", pending.pkg_name, 
-                             (!pending.candidate.version.empty() ? " (" + pending.candidate.version + ")" : ""), " from the Napt repository.\n");
-                }
-            }
-        }
+    if (!download_napt_packages(pending_napt_downloads, decisions, quiet)) {
+        had_error = true;
     }
 
     return !had_error;
@@ -1836,6 +1897,21 @@ int main(int argc, char** argv) {
     }
 
     if (command.empty()) { show_help(); return 0; }
+
+    if (command == "moo") {
+        if (!pkgs.empty() && pkgs[0] == "moo") {
+            cout << "There are no easter eggs in this program.\n";
+        } else {
+            cout << "         (__) \n"
+                 << "         (oo) \n"
+                 << "   /------\\/ \n"
+                 << "  / |    ||  \n"
+                 << " *  ||---||  \n"
+                 << "    ^^   ^^  \n"
+                 << "...Have you mooed today?\n";
+        }
+        return 0;
+    }
 
     if (geteuid() != 0) { cout << "Root privileges required.\n"; return 1; }
 
